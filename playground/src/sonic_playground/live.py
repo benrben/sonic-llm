@@ -10,6 +10,7 @@ Routes (all under /api/live):
   DELETE /session             stop the engines (also after IDLE_STOP_S without use)
   GET  /files                 the document library (path, bytes, estimated tokens)
   PUT  /files/{name}          add a text document of your own (the request body is the file)
+  POST /agent-room            {scenario, files}: the most agents at once this test can run on the loaded model
   POST /run                   {scenario, message, files, agents}: run one test; progress on /events
   POST /run/stop              stop the run: its requests end at the engines' next step, and nothing goes in the history
   POST /reset                 forget the chat history
@@ -44,6 +45,7 @@ from .chat_template import template_for
 from .live_parts.agents import fit_prompt, prompt_room
 from .live_parts.engine import stop_orphans
 from .live_parts.events import Bus, epoch_start
+from .live_parts.room import agent_room
 from .live_parts.run import run_scenario
 from .live_parts.scenarios import SCENARIOS, SYSTEM_CHAT, RunReq
 from .live_parts.session import Session, run_going
@@ -214,6 +216,22 @@ async def delete_file(name: str) -> dict:
         raise HTTPException(404, str(e)) from e
     log(f"removed {path} from the documents")
     return {"path": path}
+
+
+class RoomReq(BaseModel):
+    scenario: str
+    files: list[str] = Field(default_factory=list)
+
+
+@router.post("/agent-room")
+async def post_agent_room(req: RoomReq) -> dict:
+    """The most agents the loaded model's memory holds at once for this test and these documents (the Max button)."""
+    s = SESSION
+    if s is None or s.state != "ready":
+        raise HTTPException(409, "no model is loaded: pick one at the top")
+    if req.scenario not in {x["id"] for x in SCENARIOS}:
+        raise HTTPException(422, f"unknown scenario {req.scenario!r}")
+    return await asyncio.to_thread(agent_room, s, req.scenario, req.files)
 
 
 @router.post("/run")

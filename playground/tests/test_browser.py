@@ -158,7 +158,7 @@ def test_chat_swarm_and_burst_with_real_clicks(playground):
         page.wait_for_function("document.querySelectorAll('#swarm .cell').length > 0 && "
                                "document.querySelectorAll('#swarm .cell:not(.done)').length === 0", timeout=60_000)
         _wait_idle(page, 30_000)
-        assert page.locator("#swarm .cell").count() == 9  # the nine sample documents
+        assert page.locator("#swarm .cell").count() == 8  # the default of eight agents, on the biggest samples
         assert "Read speed" in page.locator("#tiles").inner_text()
 
         # throughput burst with 8 agents: only the number of agents is asked
@@ -263,7 +263,83 @@ def test_comparison_shows_both_engines_and_the_ratio_in_words(compared):
         assert page.locator("#swarm .swarmrow").count() == 2
         tiles = page.locator("#tiles").inner_text()
         assert "faster" in tiles or "slower" in tiles or "about the same" in tiles
-        assert "%" not in tiles  # a ratio in words, never a bare percentage
+        speed = " ".join(page.locator("#tiles .tile:not(:has-text('Correct'))").all_inner_texts())
+        assert "%" not in speed  # a ratio in words, never a bare percentage (the score tile has its percentage)
+        score = page.locator("#tiles .tile:has-text('Correct')").inner_text()
+        assert "Sonic LLM: 0 of 8" in " ".join(score.split()) and "llama.cpp: 0 of 8" in " ".join(score.split())  # the fake engine writes token ids: all wrong, for both
+        assert page.locator("#runGrade").inner_text() == "Both engines got 0 of 8 right."
         assert page.locator("#runVerdict").is_visible()
+        browser.close()
+    assert not errors, errors
+
+
+def test_graded_swarm_shows_the_score_the_answers_and_the_wrong_only_filter(playground):
+    base, _ = playground
+    with sync_api.sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        errors = _watch(page)
+        _ready(page, base)
+        _load(page)
+        _pick(page, "Agent swarm")
+
+        # the most agents that fit, from the memory plan: a button next to the field sets it (the defaults stay modest)
+        page.wait_for_function("document.getElementById('agentRoom').textContent.includes('up to')")
+        assert page.locator("#agents").input_value() == "8"
+        most = int(page.locator("#agentRoom").inner_text().split("up to ")[1].split(" ")[0])
+        assert 8 < most <= 256 and "Graded" in page.locator("#plan").inner_text()
+
+        # the documents window: shortcuts and a count
+        page.click("#attach")
+        page.click("#pickFirst [data-first='32']")
+        assert "32 documents picked" in page.locator("#filesSel").inner_text()
+        assert page.locator("#pickAll").inner_text() == "Pick all 256"
+        page.keyboard.press("Escape")
+        assert page.locator("#nfiles").inner_text() == "32 documents picked" and page.locator("#agents").input_value() == "32"
+
+        page.click("#send")
+        page.wait_for_function("document.querySelectorAll('#swarm .cell').length === 32 && "
+                               "document.querySelectorAll('#swarm .cell:not(.done)').length === 0", timeout=60_000)
+        _wait_idle(page, 60_000)
+
+        # the score: all 32 wrong (the fake engine writes token ids), said in words and with the cross in every tile
+        
+        score = " ".join(page.locator("#tiles .tile:has-text('Correct')").inner_text().split())
+        assert "0 of 32" in score and "0%" in score and "32 wrong" in score and "0 no answer" in score
+        assert page.locator("#runGrade").inner_text() == "Sonic LLM got 0 of 32 right."
+        assert page.locator("#swarm .cell.v-bad").count() == 32 and page.locator("#legendGrade").is_visible()
+
+        # an agent's row opens to its document, question, answer, expected answer and verdict
+        page.locator("#messages .arow summary").first.click()
+        facts = page.locator("#messages .arow[open] .facts").first.inner_text()
+        assert "Document" in facts and "Question" in facts and "Expected" in facts and "Verdict" in facts and "Wrong" in facts
+        assert page.locator("#messages .arow[open] pre").first.inner_text().strip()
+
+        # the filter: wrong only keeps all 32, no answer keeps none
+        page.click("#messages .filter label:has-text('Wrong only')")
+        assert page.locator("#messages .arow:visible").count() == 32
+        page.click("#messages .filter label:has-text('No answer')")
+        assert page.locator("#messages .arow:visible").count() == 0 and "No answer matches" in page.locator("#messages .agentlist").evaluate("e => e.dataset.empty")
+
+        # more than a page: 64 agents show 50 rows and a pager
+        page.click("#attach")
+        page.click("#pickFirst [data-first='64']")
+        page.keyboard.press("Escape")
+        page.click("#send")
+        page.wait_for_function("document.querySelectorAll('#swarm .cell').length === 64 && "
+                               "document.querySelectorAll('#swarm .cell:not(.done)').length === 0", timeout=90_000)
+        _wait_idle(page, 60_000)
+        assert page.locator("#messages .arow:visible").count() == 50 and "1–50 of 64" in page.locator("#messages .pg").inner_text()
+        page.click("#messages [data-page='1']")
+        assert page.locator("#messages .arow:visible").count() == 14
+
+        # Max: one agent per document tests pick that many documents
+        page.click("#agentsMax")
+        assert page.locator("#nfiles").inner_text() == f"{min(most, 256)} documents picked"
+
+        # earlier runs show their score
+        page.click("#historyBtn")
+        page.wait_for_function("document.querySelectorAll('#historyList .hitem').length >= 2")
+        assert "got 0 of 64 right" in page.locator("#historyList .hitem").first.inner_text()
         browser.close()
     assert not errors, errors

@@ -93,7 +93,7 @@ Fifteen tests in four groups. Each card on the page carries the same one-line pr
 | Many agents | Follow-up question | A new question for the agents of the last swarm or team, which still remember their documents. |
 | Many agents | Relay | Fresh agents with an empty memory work through a plan of small stories. |
 | Many agents | Agents taking turns | Many agents take turns, a few at a time; the others are parked on disk. Sonic LLM only. |
-| Documents | Many questions, one document | Many agents ask different questions about the same long document, read only once. |
+| Documents | Many questions, one document | Many agents ask different questions about the same document, read only once. |
 | Documents | Classify | One agent per document sorts it under one of your labels. |
 | Documents | Extract | One agent per document pulls the fields you name into JSON. |
 | Documents | Summarize | One agent per document writes its own short summary. |
@@ -102,15 +102,65 @@ Fifteen tests in four groups. Each card on the page carries the same one-line pr
 | Checks | Throughput burst | Many agents write at the same time: words per second the machine writes. |
 | Checks | Exactness | The same question alone and beside other agents: are the words identical? |
 
-The tests read **documents**: nine sample files come with the playground (`samples/`), and you can add your own text files from
-the documents window (they are kept in `<data>/documents/`, and you can remove them again there; the samples stay). Every run
-is saved, and the clock button in the top bar lists the earlier runs; **Show numbers** puts one back on the page (the numbers
-are kept, the answers are not).
+The tests read **documents**: 256 sample files come with the playground (`samples/`, see below), and you can add your own text files
+from the documents window (they are kept in `<data>/documents/`, and you can remove them again there; the samples stay). The
+window has shortcuts to pick the first 8, 32 or 64 documents, or all of them, and counts what is picked. Every run is saved, and
+the clock button in the top bar lists the earlier runs with the score of graded ones; **Show numbers** puts one back on the page
+(the numbers are kept, the answers are not).
+
+## The sample library and grading
+
+`samples/` holds 256 invented documents, 2.5 to 4 KB each, in ten kinds: meeting notes, product manual, trip plan, recipe,
+incident report, invoice, lease summary, lab report, club newsletter and project status. 256 is the most agents the engine runs at
+once, so "all samples" fills it. They are made by `tools/make_samples.py` (standard library only, a fixed seed: the same files on
+every run; a test checks that the committed files are exactly what it writes) from templates and word lists. Every document states
+its facts once, with distractor numbers, dates and names around them. All people, places and companies are made up. The generated
+files are committed, so nobody needs to run the generator. `samples/answers.json` is the answer key: per document its kind, about
+five fields with their true values, and about five questions with the answers a grader accepts ("14 March 2027", "March 14, 2027",
+"2027-03-14"; "1,250" and "1250").
+
+A run is **graded** when the test has a right answer, every document it reads has a key and you typed no question of your own:
+
+| Test | What each agent gets | Right means |
+|------|----------------------|-------------|
+| Agent swarm, Research team | one keyed question about its own document (the five questions are spread over the agents) | the answer holds an accepted form |
+| Many questions, one document | the document's keyed questions in turn (more agents than questions repeat them; the result says so) | the same |
+| Follow-up question | a second keyed question, never the first | the same |
+| Classify | the ten kinds as labels | the reply names exactly one label, and it is the right one |
+| Extract | its document's keyed fields | the reply is a JSON object and each field matches |
+
+Every other test (summarize, compress, relay, long document, chat, turns, burst, load, exactness) says "Not graded" and shows no
+score, and so does a run with your own question, labels or documents.
+
+The rules are in `grading.py`, deterministic, with no model as judge. Case, punctuation, quotes, thousands separators, leading
+articles and common date forms do not matter. An accepted form must appear as whole words or numbers: `12500` is not `1250`.
+Two different dates, codes or numbers put forward as the answer ("1,250 or 1,520 euros") count as hedging and fail. The thinking of
+a model (`<think>...</think>` or reasoning) is never graded, only the final answer; no final answer is "No answer". The page shows
+**Correct** with the score and the percentage for each engine (blue Sonic LLM, orange llama.cpp), a plain line such as "Both
+engines got 61 of 64 right", a check, cross or dash in every agent tile, and, in the answers, a row per agent that opens to the
+document, the question, the whole answer, the expected answer and the verdict, with a filter (All, Wrong only, No answer) and 50
+rows to a page. The run record keeps `graded`, `correct`, `wrong` and `empty` per engine and, per agent, the question, the
+expected answer and the verdict.
+
+What "correct" means, and does not: the agent's answer holds the exact fact written in the text, found by rules. It is one run, so
+the percentage is one reading, not a measure of the model. A right fact next to a wrong claim passes, a correct answer worded in
+a way the accepted forms do not cover fails, and a name is checked only for the name (two names given together pass if one is
+right). A verbose answer that mentions another number next to the right one passes unless that number is offered as the answer.
+
+## How many agents fit
+
+Next to the **Agents** field the page says "This Mac can run up to N agents at once on this test" for the loaded model and the test
+you picked, and **Max** sets it (for the tests with one agent per document it picks that many documents). N comes from the engine's
+own memory plan: the largest count whose context still holds a whole document and the answer, never more than 256. The defaults
+stay modest (8 agents for the document tests); Max is your choice. Past N the rest wait for a free slot or read less of their
+document, and the plan line under the test says so. With **Compare with llama.cpp** on, a run of more than 64 agents carries a
+warning that it takes much longer.
 
 ## Develop
 
 ```sh
 uv run --locked pytest -q                                   # unit tests, no model and no GPU
+python tools/make_samples.py                                # write the 256 samples and answers.json again (identical output)
 SONIC_SERVER_BIN=../engine/target/release/sllm-server \
   uv run --locked pytest -q tests/test_browser.py           # the whole page with real clicks, on the engine's --fake mode
 uv run playwright install chromium                          # once, for the browser test

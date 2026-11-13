@@ -38,6 +38,7 @@
   <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
   <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
   <symbol id="i-alert" viewBox="0 0 24 24"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0zM12 9v4M12 17h.01"/></symbol>
+  <symbol id="i-dash" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M8 12h8"/></symbol>
   <symbol id="i-no" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="m15 9-6 6M9 9l6 6"/></symbol>
   <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></symbol>
   <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6M10 11v6M14 11v6M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></symbol>
@@ -103,7 +104,11 @@
           <span class="label" id="docsLabel">Documents</span>
           <div class="row"><button id="attach" class="btn" type="button"><svg class="ic s" aria-hidden="true"><use href="#i-doc"/></svg><span id="nfiles">Choose documents</span></button><div class="attached" id="attached"></div></div>
         </div>
-        <label class="agentsbox" id="agentsRow" hidden>Agents <input type="number" id="agents" min="1" max="256" step="1" value="256"></label>
+        <div class="agentsbox" id="agentsRow" hidden>
+          <label>Agents <input type="number" id="agents" min="1" max="256" step="1" value="8"></label>
+          <button class="btn" id="agentsMax" type="button" hidden>Max</button>
+          <span class="room small muted" id="agentRoom" role="status"></span>
+        </div>
         <div id="levelBox" hidden>
           <span class="label small" id="thinkHead">Answer level</span>
           <div class="seg" id="think" role="radiogroup" aria-labelledby="thinkHead"></div>
@@ -140,13 +145,14 @@
       </div>
       <blockquote class="ask" id="runAsk" hidden></blockquote>
       <p class="verdict-line" id="runVerdict" hidden></p>
+      <p class="grade-line" id="runGrade" hidden></p>
       <p class="key small" id="tileKey" hidden><span><i class="swatch"></i>Sonic LLM</span><span><i class="swatch llama"></i>llama.cpp</span><span class="muted">Ratios say how much faster Sonic LLM is.</span></p>
       <div class="tiles" id="tiles"></div>
       <p class="honest small">One live run on this machine, not a benchmark.</p>
       <section class="card" id="swarmCard" hidden aria-labelledby="agentsH">
         <div class="card-h"><h3 id="agentsH">Agents</h3><span class="small muted" id="swarmNote"></span></div>
         <div id="swarm"></div>
-        <p class="legend small muted" aria-hidden="true"><span><i class="cell waiting"></i>waiting</span><span><i class="cell reading"></i>reading</span><span><i class="cell writing"></i>writing</span><span><i class="cell done"></i>done</span><span><i class="cell stopped"></i>stopped</span></p>
+        <p class="legend small muted" aria-hidden="true"><span><i class="cell waiting"></i>waiting</span><span><i class="cell reading"></i>reading</span><span><i class="cell writing"></i>writing</span><span><i class="cell done"></i>done</span><span><i class="cell stopped"></i>stopped</span><span id="legendGrade" hidden><i class="cell done v-ok"></i>correct<i class="cell done v-bad"></i>wrong<i class="cell done v-none"></i>no answer</span></p>
       </section>
       <section class="chartgrid" id="charts" aria-label="Live charts">
         <div class="card"><div class="card-h"><h3>Write speed</h3><div class="legend small" id="legendTok"></div><span class="small muted">tokens/s</span></div><div class="chart" id="chartTok"></div></div>
@@ -167,6 +173,8 @@
 <dialog id="files" aria-labelledby="filesH">
   <div class="dlg-h"><h2 id="filesH">Documents</h2><span class="small muted sub">The tests read these. Samples come with the playground.</span><button class="btn icon quiet" id="filesClose" type="button" aria-label="Close"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button></div>
   <input id="filesSearch" type="search" placeholder="Search documents" aria-label="Search documents">
+  <div class="pickrow" id="pickFirst">
+    <button class="btn" type="button" data-first="8">Pick first 8</button><button class="btn" type="button" data-first="32">Pick first 32</button><button class="btn" type="button" data-first="64">Pick first 64</button><button class="btn" type="button" data-first="0" id="pickAll">Pick all</button></div>
   <div id="filesList" class="fileslist"></div>
   <div class="dropzone" id="drop">
     <svg class="ic" aria-hidden="true"><use href="#i-upload"/></svg>

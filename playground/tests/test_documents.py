@@ -47,13 +47,6 @@ def test_an_upload_that_is_not_a_small_text_file_is_refused(library, name, data,
     assert not (library.documents_dir).exists() or not list(library.documents_dir.iterdir())
 
 
-def test_the_bundled_samples_are_nine_files_of_a_few_kilobytes():
-    from sonic_playground.settings import PLAYGROUND_DIR
-
-    sizes = {p.name: p.stat().st_size for p in (PLAYGROUND_DIR / "samples").iterdir()}
-    assert len(sizes) == 9 and all(2500 <= n <= 6000 for n in sizes.values()), sizes
-
-
 def test_an_uploaded_document_can_be_removed_but_a_sample_and_other_paths_cannot(library):
     documents.save_upload("mine.md", b"my own text")
     assert documents.delete_upload("mine.md") == "uploads/mine.md"

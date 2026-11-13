@@ -4,6 +4,7 @@
   'use strict';
   var App = window.App, S = App.S, $ = App.$, V = App.V, esc = App.esc, isIn = App.isIn;
   var PER_FILE = ['swarm', 'team', 'relay', 'classify', 'extract', 'compress', 'summarize'];  // one agent per picked document
+  var GRADED = ['swarm', 'team', 'followup', 'shared', 'classify', 'extract'];  // tests the sample documents' answer key can grade
   // Chat attaches documents to one message; every other test works on one set, kept while you move between them.
   function fileSet(id) { return id === 'chat' ? 'chat' : 'jobs'; }
   App.fileSet = fileSet;
@@ -71,7 +72,7 @@
       App.api('POST', '/preread', body).catch(function () { /* only a head start: the run reads what is missing */ });
     }, 60);
   }
-  $('input').oninput = function () { renderSuggest(); preread(); };
+  $('input').oninput = function () { renderSuggest(); preread(); renderPlan(); };
 
   // -- agents and the plan --------------------------------------------------------------------------------------------
   function agentCount() {
@@ -84,15 +85,52 @@
     $('agentsRow').hidden = !(V.NEEDS[sc.id] || {}).agents;
     $('agents').disabled = byFiles; $('agents').title = byFiles ? 'One agent per picked document' : '';
     if (document.activeElement !== $('agents')) $('agents').value = agentCount();
+    renderRoom();
+  }
+  // Will the run be graded? The tests with a right answer are, on documents that have a key and with no question of your own.
+  function gradeKind(id, agents) {
+    if (!isIn(GRADED, id)) return '';
+    if ($('input').value.trim() && id !== 'shared') return 'typed';
+    if (id === 'followup') return 'follow';
+    var byPath = {}; S.files.forEach(function (f) { byPath[f.path] = f; });
+    var docs = S.picked.length ? S.picked.map(function (p) { return byPath[p]; }) : S.files.slice().sort(function (a, b) { return b.bytes - a.bytes; }).slice(0, agents);
+    if (id === 'shared') docs = docs.slice(0, 1);
+    return docs.length ? (docs.every(function (f) { return f && f.keyed; }) ? 'yes' : 'unkeyed') : '';
   }
   // What pressing Run will really do, in one line (liveview.js writes it).
   function renderPlan() {
-    var id = App.cur().id, legacy = thinkLegacy(), n = S.picked.length;
-    var p = V.planText(id, { n: n, a: agentCount(), perFile: isIn(PER_FILE, id), first: n ? S.picked[0].split('/').pop() : '', files: S.files.length,
-      max: App.MAX_AGENTS, par: App.lim('limPar'), maxThink: legacy && V.THINK[S.think] === 'max', level: legacy ? 'off' : S.level });
+    var id = App.cur().id, legacy = thinkLegacy(), n = S.picked.length, a = agentCount(), room = roomNow();
+    var p = V.planText(id, { n: n, a: a, perFile: isIn(PER_FILE, id), first: n ? S.picked[0].split('/').pop() : '', files: S.files.length,
+      max: App.MAX_AGENTS, par: App.lim('limPar'), maxThink: legacy && V.THINK[S.think] === 'max', level: legacy ? 'off' : S.level,
+      grade: gradeKind(id, a), room: room && room.max > 1 ? room.max : null, compare: !!(S.session && S.session.compare) });
     $('plan').textContent = p.t; $('plan').className = 'plan' + (p.warn ? ' warn' : '');
   }
   App.renderPlan = renderPlan; App.renderAgents = renderAgents;
+
+  // -- the most agents the loaded model holds at once on this test (the server computes it from the memory plan) ----------------
+  var roomTimer = null;
+  function roomKey() { var s = S.session; return s && s.state === 'ready' && App.cur().id ? [s.model, s.compare, App.cur().id, S.picked.join(',')].join('|') : ''; }
+  function roomNow() { return S.room && S.room.key === roomKey() ? S.room : null; }
+  function renderRoom() {
+    var key = roomKey(), room = roomNow(), has = !!room && room.max > 1;
+    $('agentRoom').textContent = has ? 'This Mac can run up to ' + V.many(room.max, 'agent') + ' at once on this test.' : '';
+    $('agentsMax').hidden = !has;
+    if (!key || room || S.roomAsked === key) return;
+    S.roomAsked = key; clearTimeout(roomTimer);
+    roomTimer = setTimeout(function () {
+      App.api('POST', '/agent-room', { scenario: App.cur().id, files: S.picked.slice() }).then(function (d) {
+        if (roomKey() !== key) return;
+        S.room = Object.assign({ key: key }, d); renderRoom(); renderPlan();
+      }).catch(function (e) { S.roomAsked = null; App.logLine('how many agents fit could not be read: ' + e.message); });
+    }, 120);
+  }
+  App.renderRoom = renderRoom;
+  // Max: one agent per document tests pick that many documents, the others set the number of agents
+  $('agentsMax').onclick = function () {
+    var room = roomNow(); if (!room) return;
+    if (isIn(PER_FILE, App.cur().id)) { S.picked = S.files.slice(0, room.max).map(function (f) { return f.path; }); App.renderAttached(); return; }
+    S.agents = String(room.max); renderAgents(); renderPlan();
+  };
   $('agents').oninput = function () { S.agents = $('agents').value; renderPlan(); };
   $('agents').onblur = renderAgents;
 

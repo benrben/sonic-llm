@@ -9,7 +9,7 @@
   // S.view: the run and session state, changed only by dispatch (V.reduceRun); S.session mirrors S.view.session
   App.S = { view: V.RUN0, session: null, scenarios: [], scen: 'chat', files: [], picked: [], picks: { chat: [], jobs: [] }, open: {}, shown: {}, sure: null,
     agents: null, think: 0, level: 'off', runs: {}, ticks: [], lastTick: null, swarm: {}, gridRun: null, setup: null, models: 0,
-    final: {}, live: {}, tilesHtml: '', hasRun: false, started: null };
+    final: {}, live: {}, tilesHtml: '', hasRun: false, started: null, room: null, roomAsked: null };
   App.isIn = function (list, x) { return list.indexOf(x) >= 0; };
 
   // JSON over fetch; an error answer throws with the server's own words

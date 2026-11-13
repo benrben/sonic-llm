@@ -17,7 +17,7 @@ from fastapi import HTTPException
 from .. import gpu_busy, levels, live, settings  # live: its log and BUS are looked up there when used (tests patch them)
 from ..chat_template import Template, template_for
 from ..gguf_meta import train_ctx
-from .config import BLOCK_PAGE, CTX, IDLE_STOP_S, LONG_STREAMS, MANY_AGENTS, SERIES, TICK_S
+from .config import BLOCK_PAGE, CTX, IDLE_STOP_S, LONG_STREAMS, MANY_AGENTS, MAX_AGENTS, SERIES, TICK_S
 from .engine import Engine
 from .events import _rate
 from .scenarios import DOC_TASKS, LEVEL_FREE, TURNS_AT_ONCE, TURNS_FLAGS, RunReq
@@ -183,6 +183,15 @@ class Session:
         if scenario == "chat":  # the requests a chat answer runs at once, no more: 4 streams of the trained context cost Qwen3-4B
             return max(1, agents)  # 22.5 GB for one chat (2026-11-09), one stream 6 GB
         return LONG_STREAMS
+
+    def max_agents(self, scenario: str, need: int | None) -> int:
+        """The most agents this test can run at once on this memory: the largest count whose context still holds `need` tokens
+        (one agent's prompt and answer) and whose block fits in the KV cells. At least 1, at most the engine's own cap."""
+        for n in range(MAX_AGENTS, 1, -1):
+            ctx = self.ctx_for(scenario, n, None, need)
+            if ctx >= (need or 0) and self.streams_for(scenario, n) * ctx <= self.cells_max:
+                return n
+        return 1
 
     def block_cells(self, streams: int, ctx: int) -> int:
         """KV cells for `streams` sequences of `ctx` cells, in whole pages, never more than what fits."""

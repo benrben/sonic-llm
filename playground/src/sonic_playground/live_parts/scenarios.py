@@ -4,12 +4,12 @@ are read."""
 
 from __future__ import annotations
 
-import json
 import re
 from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, Field
 
+from ..grading import json_object as json_of  # a reply that is a JSON object (None when it is not)
 from .config import MAX_AGENTS
 
 if TYPE_CHECKING:
@@ -98,6 +98,7 @@ DOC_TASKS = {
     "summarize": {"system": "You summarize documents. Use only what the document says.", "ask": "Summarize this document {m}."},
 }  # fmt: skip
 
+DEFAULT_AGENTS = 8  # what a test with one agent per document starts with; the page's Max button raises it
 LEVEL_FREE = ("exact", "burst", "turns", "long")  # tests of the raw engine: no answer levels
 
 SCENARIOS = [
@@ -109,14 +110,14 @@ SCENARIOS = [
      "suggest": ["What are the three most important things in these documents?"]},
     {"id": "swarm", "group": "Many agents", "name": "Agent swarm",
      "what": "One agent per document reads it at the same time, then one answer merges what they found.",
-     "suggest": ["What decisions are recorded, and why?", "Which numbers do the documents give?"], "agents": MAX_AGENTS},
+     "suggest": ["What decisions are recorded, and why?", "Which numbers do the documents give?"], "agents": DEFAULT_AGENTS},
     {"id": "team", "group": "Many agents", "name": "Research team",
      "what": "Ask several questions. An agent per document answers from its own text, then a manager merges the reports.",
      "suggest": ["What was decided, and when?\nWhich amounts of money are named?\nWhat is still open?",
-                 "Which people are named?\nWhich dates are named?\nWhat should happen next?"], "agents": MAX_AGENTS},
+                 "Which people are named?\nWhich dates are named?\nWhat should happen next?"], "agents": DEFAULT_AGENTS},
     {"id": "followup", "group": "Many agents", "name": "Follow-up question",
      "what": "Ask the agents of your last swarm or team a new question: they still remember their documents.",
-     "suggest": ["What numbers do the documents give?", "What is still open or unclear?"], "agents": MAX_AGENTS},
+     "suggest": ["What numbers do the documents give?", "What is still open or unclear?"], "agents": DEFAULT_AGENTS},
     {"id": "relay", "group": "Many agents", "name": "Relay",
      "what": "Fresh agents with an empty memory work through a plan, one small story each, lap after lap.",
      "suggest": ["Collect the key facts and numbers each document gives.", "Find what each document says is still open."], "agents": 4},
@@ -130,19 +131,19 @@ SCENARIOS = [
     {"id": "classify", "group": "Documents", "name": "Classify",
      "what": "One agent per document sorts it under one of your labels.",
      "ask": "Labels, separated by commas…",
-     "suggest": ["recipe, plan, guide, minutes, history, manual, other", "food, travel, money, home, community"], "agents": MAX_AGENTS},
+     "suggest": ["recipe, plan, guide, minutes, history, manual, other", "food, travel, money, home, community"], "agents": DEFAULT_AGENTS},
     {"id": "extract", "group": "Documents", "name": "Extract",
      "what": "One agent per document pulls the fields you name into a JSON object.",
      "ask": "Fields to pull out, separated by commas…",
-     "suggest": ["title, date, people, amounts, open items", "topic, steps, tools, warnings"], "agents": MAX_AGENTS},
+     "suggest": ["title, date, people, amounts, open items", "topic, steps, tools, warnings"], "agents": DEFAULT_AGENTS},
     {"id": "summarize", "group": "Documents", "name": "Summarize",
      "what": "One agent per document writes its own short summary.",
      "ask": "How, for example: in 3 sentences…",
-     "suggest": ["in 3 sentences", "in 5 bullet points"], "agents": MAX_AGENTS},
+     "suggest": ["in 3 sentences", "in 5 bullet points"], "agents": DEFAULT_AGENTS},
     {"id": "compress", "group": "Documents", "name": "Compress",
      "what": "One agent per document rewrites it shorter and keeps every name, number and date.",
      "ask": "How short, for example: to about a quarter of its length…",
-     "suggest": ["to about a quarter of its length", "to at most 5 lines"], "agents": MAX_AGENTS},
+     "suggest": ["to about a quarter of its length", "to at most 5 lines"], "agents": DEFAULT_AGENTS},
     {"id": "load", "group": "Checks", "name": "Chat under load",
      "what": "A chat question alone, then again while many agents work. Does the chat stay fast?",
      "suggest": ["Explain how a bicycle stays upright, in three sentences.", "Write a haiku about the sea."], "agents": 8},
@@ -193,15 +194,6 @@ def pick_label(reply: str, labels: list[str]) -> str | None:
     low = reply.strip().strip("*`'\".").lower()
     named = [x for x in labels if re.search(rf"(?<!\w){re.escape(x.lower())}(?!\w)", low)]
     return next((x for x in labels if x.lower() == low), named[0] if len(named) == 1 else None)
-
-
-def json_of(reply: str) -> dict | None:
-    """The JSON object a reply is, in a code fence or not. None when it is not one."""
-    try:
-        v = json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", reply.strip()))
-    except ValueError:  # not JSON: the run reports the reply as "not valid JSON" (doc_verdict, doc_task_report)
-        v = None
-    return v if isinstance(v, dict) else None
 
 
 def labels_of(message: str) -> list[str]:

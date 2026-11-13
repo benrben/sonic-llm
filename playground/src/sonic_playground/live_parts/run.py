@@ -13,6 +13,7 @@ from fastapi import HTTPException
 from .. import live  # its log and BUS are looked up there when used (tests patch them)
 from ..documents import list_files
 from .agents import doc_need
+from .graded import not_graded
 from .config import CTX, SERIES
 from .engine import Engine
 from .runners import _RUNNERS, _TIMED_RUNNERS, _run_doc_task
@@ -90,6 +91,8 @@ async def _run_on_engine(s: Session, req: RunReq, run_id: str, rt: str) -> dict:
     tok0 = s.engines[rt].tokens
     s.engines[rt].begin_run()
     m = await _scenario_metrics(s, req, run_id, rt, w0)
+    if not m.get("graded"):  # a graded run says so in its own numbers; the others say why they are not
+        m = {**not_graded(req.scenario, req.message), **m}
     if rt == "sllm":
         await _note_spec(s.engines[rt], m)
     wall = time.monotonic() - w0

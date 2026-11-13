@@ -18,4 +18,5 @@ def value(flag: str) -> str:
 
 
 real = os.environ["SONIC_REAL_SERVER_BIN"]
-os.execv(real, [real, "--fake", "--host", value("--host"), "--port", value("--port"), "--fake-token-ms", "4", "--fake-prefill-ms", "5"])
+ctx = value("--ctx") if "--ctx" in args else value("-c")  # the context the playground sized for the run (llama-server's is -c)
+os.execv(real, [real, "--fake", "--host", value("--host"), "--port", value("--port"), "--ctx", ctx, "--fake-token-ms", "4", "--fake-prefill-ms", "5"])

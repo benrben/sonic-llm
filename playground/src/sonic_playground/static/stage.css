@@ -61,6 +61,12 @@
 .tile .t-ratio:empty { display: none; }
 .honest { color: var(--muted); margin-top: -8px; }
 .verdict-line { font-size: var(--fs-l); font-weight: 700; }
+.grade-line { font-size: var(--fs-m); font-weight: 600; color: var(--ink-2); }
+.tile h4 { display: flex; align-items: center; gap: 6px; }
+.t-live .ic { vertical-align: -3px; margin-right: 3px; }
+.t-live { margin-right: 8px; }
+.g-bad { color: var(--red); }
+.g-none { color: var(--muted); }
 .key { display: flex; flex-wrap: wrap; gap: 4px 16px; color: var(--ink-2); margin-top: -4px; }
 .key span { display: inline-flex; align-items: center; gap: 6px; }
 
@@ -80,6 +86,13 @@
 .cell.parked { border-style: dashed; }
 .cell.stopped { opacity: .4; border-style: dotted; }
 .cell.empty { background: var(--surface); }
+/* a graded agent: a check on the engine's colour, a red cross on an open tile, a dash on a dashed one (marks, so not colour alone) */
+.cell.v-ok, .cell.v-bad, .cell.v-none { display: inline-grid; place-items: center; font-size: 13px; font-weight: 700; line-height: 1; }
+.cell.v-ok::after { content: "\2713"; color: var(--on-btn); }
+.cell.v-bad { background: var(--surface) !important; border-color: var(--red) !important; }
+.cell.v-bad::after { content: "\2715"; color: var(--red); }
+.cell.v-none { background: var(--surface) !important; border-style: dashed; }
+.cell.v-none::after { content: "\2013"; color: var(--muted); }
 .swarmrow .count { font-size: var(--fs-s); font-variant-numeric: tabular-nums; color: var(--ink-2); text-align: right; white-space: nowrap; }
 .barbox { height: 4px; margin: 0 0 14px 108px; border-radius: 2px; background: var(--card-2); overflow: hidden; }
 .barbox i { display: block; height: 100%; background: var(--blue); transition: width .2s; }
@@ -92,6 +105,8 @@
 .legend .cell.waiting { border-color: var(--edge); }
 .legend .cell.stopped { border-color: var(--edge); }
 .legend .cell { animation: none; }
+.legend .cell.v-ok, .legend .cell.v-bad, .legend .cell.v-none { margin-left: 8px; font-size: 10px; }
+.legend .cell.v-ok { border-color: var(--blue); }
 #legendTok span { display: inline-flex; align-items: center; gap: 6px; margin-right: 10px; color: var(--ink-2); }
 
 /* charts */
@@ -122,6 +137,12 @@
 .verdict.bad { color: var(--red); }
 .agentlist { max-height: 46vh; margin-top: 10px; overflow: auto; border: 1px solid var(--hairline); border-radius: var(--radius-s); background: var(--surface); }
 .agentlist:empty { display: none; }
+.agentlist[data-empty]:not([data-empty=""])::after { content: attr(data-empty); display: block; padding: 10px 12px; font-size: var(--fs-s); color: var(--muted); }
+.alist-h { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin-top: 10px; }
+.alist-h + .agentlist { margin-top: 8px; }
+.alist-h .seg span { padding: 4px 10px; }
+.pager { display: inline-flex; align-items: center; gap: 4px; font-size: var(--fs-s); font-variant-numeric: tabular-nums; color: var(--ink-2); }
+.pager .btn { min-height: 30px; padding: 0 10px; }
 .arow { border-bottom: 1px solid var(--hairline); }
 .arow:last-child { border-bottom: 0; }
 .arow summary { display: flex; align-items: center; gap: 10px; padding: 6px 12px; font-size: var(--fs-s); cursor: pointer; list-style: none; }
@@ -137,6 +158,15 @@
 .arow .body { position: relative; padding: 0 12px 10px 32px; }
 .arow pre { margin: 0; padding-right: 64px; max-height: 300px; overflow: auto; font: var(--fs-s)/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 .arow .copy { position: absolute; right: 12px; top: 0; }
+.arow .vd .ic { vertical-align: -3px; margin-right: 4px; }
+.arow .facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px 12px; margin: 0 64px 8px 0; font-size: var(--fs-s); }
+.arow .facts dt { color: var(--muted); }
+.arow .facts dd { margin: 0; overflow-wrap: anywhere; }
+.arow .facts .ic { vertical-align: -3px; margin-right: 4px; }
+.arow .alabel { margin-bottom: 2px; font-size: var(--fs-s); color: var(--muted); }
+.arow[data-grade="wrong"] .st { border-color: var(--red); background: var(--surface); border-style: solid; }
+.arow[data-grade="no answer"] .st { border-style: dashed; background: var(--surface); }
+.arow.bad .vd { color: var(--ink); }
 
 /* the details at the bottom */
 .more > summary { cursor: pointer; font-size: var(--fs-s); font-weight: 600; color: var(--ink-2); }

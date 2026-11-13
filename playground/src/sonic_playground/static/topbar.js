@@ -62,7 +62,7 @@
   }
   App.renderSession = function () {
     var s = S.session;
-    syncPickers(); renderLoad(); App.renderSend(); App.showThink(); App.renderIntro(); App.renderSetup();
+    syncPickers(); renderLoad(); App.renderSend(); App.showThink(); App.renderIntro(); App.renderSetup(); App.renderRoom(); App.renderPlan();
     if (!s) { setStatus(S.view.loading ? 'Loading ' + $('model').value + '…' : 'No model loaded', S.view.loading ? 'busy' : ''); $('limits').innerHTML = ''; return; }
     if (s.state === 'starting') { setStatus('Loading ' + s.model + '…', 'busy'); return; }
     renderStatus(s); sayExact(s);

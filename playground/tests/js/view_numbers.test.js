@@ -107,3 +107,41 @@ test('a run that was cut keeps the time it had reached, marked so far, and stops
   const html = V.tilesHtml({ scenario: 'chat', rts: ['sllm'], now: 99000, final: {}, live });
   assert.match(html, /3\.0<\/span><span class="t-unit">s<\/span><span class="t-live">so far/);
 });
+
+const GRADED = { graded: true, correct: 61, wrong: 2, empty: 1 };
+
+test('a graded run gets a Correct tile with the score, the percentage and the wrong and unanswered counts in words', () => {
+  const html = V.tilesHtml({ scenario: 'swarm', rts: ['sllm', 'llama'], now: 0, live: {}, final: { sllm: { wall_s: 1, ...GRADED }, llama: { wall_s: 2, graded: true, correct: 60, wrong: 3, empty: 1 } } });
+  assert.match(html, /<h4><svg[^>]*><use href="#i-check"\/><\/svg>Correct<\/h4>/);
+  assert.match(html, /61 of 64<\/span><span class="t-unit">95%/);
+  assert.match(html, /60 of 64<\/span><span class="t-unit">94%/);
+  assert.match(html, /2 wrong/);
+  assert.match(html, /1 no answer/);
+});
+
+test('an ungraded run has no Correct tile, and says plainly that it was not graded', () => {
+  const final = { sllm: { wall_s: 1, graded: false, graded_note: 'Not graded: this test has no single right answer.' } };
+  assert.doesNotMatch(V.tilesHtml({ scenario: 'chat', rts: ['sllm'], now: 0, live: {}, final }), /Correct/);
+  assert.equal(V.gradeText(final), 'Not graded: this test has no single right answer.');
+  assert.equal(V.gradeText({ sllm: { wall_s: 1 } }), '');  // a run saved before grading existed
+});
+
+test('the line under the verdict names the score of each engine', () => {
+  assert.equal(V.gradeText({ sllm: GRADED }), 'Sonic LLM got 61 of 64 right.');
+  assert.equal(V.gradeText({ sllm: GRADED, llama: { ...GRADED } }), 'Both engines got 61 of 64 right.');
+  assert.equal(V.gradeText({ sllm: GRADED, llama: { ...GRADED, correct: 60, wrong: 3 } }), 'Sonic LLM 61, llama.cpp 60 of 64 right.');
+});
+
+test('every verdict has an icon and a word, and the history shows the score of a graded run', () => {
+  assert.match(V.verdictHtml('correct'), /i-check.*Correct/);
+  assert.match(V.verdictHtml('wrong'), /i-no.*Wrong/);
+  assert.match(V.verdictHtml('no answer'), /i-dash.*No answer/);
+  assert.ok(plain(V.headlines({ metrics: { sllm: { wall_s: 2, ...GRADED } } })).includes('Sonic LLM got 61 of 64 right.'));
+});
+
+test('a graded agent is a tile with a mark: a check, a cross or a dash, named in its title', () => {
+  const cell = (verdict) => V.swarmRowHtml('sllm', [{ state: 'done', label: 'samples/a.md', ttft_ms: 5, tok_s: 9, verdict }], 1);
+  assert.match(cell('correct'), /cell done v-ok" title="[^"]*Correct/);
+  assert.match(cell('wrong'), /cell done v-bad" title="[^"]*Wrong/);
+  assert.match(cell('no answer'), /cell done v-none" title="[^"]*No answer/);
+});

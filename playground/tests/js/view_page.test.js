@@ -99,3 +99,16 @@ test('downloads show progress with a label and a cancel button; finished ones on
   assert.match(html, /data-load="new"/);
   assert.equal(V.downloadsActive(ds), true);
 });
+
+test('the plan says whether the run is graded, when too many agents do not fit and when a comparison will be slow', () => {
+  const base = { n: 0, a: 8, perFile: true, files: 256, max: 256, level: 'off', room: null, compare: false };
+  assert.match(V.planText('swarm', { ...base, grade: 'yes' }).t, /Graded: each answer is checked against an answer key\./);
+  assert.match(V.planText('swarm', { ...base, grade: 'typed' }).t, /Not graded: you wrote your own question\./);
+  assert.match(V.planText('swarm', { ...base, grade: 'unkeyed' }).t, /Not graded: some documents have no answer key\./);
+  const over = V.planText('swarm', { ...base, a: 100, room: 64 });
+  assert.match(over.t, /More than 64 agents do not all fit/);
+  assert.equal(over.warn, true);
+  const slow = V.planText('swarm', { ...base, a: 100, compare: true });
+  assert.match(slow.t, /With llama\.cpp compared, a run of this many agents takes much longer\./);
+  assert.doesNotMatch(V.planText('swarm', { ...base, a: 32, compare: true }).t, /llama\.cpp compared/);
+});

@@ -133,7 +133,7 @@ async def _agents(s: Session, rt: str, run_id: str, prompts: list[tuple[str, str
         async with gate:
             r = await e.generate(ids, answer_room(ctx, len(ids), cap or (room(len(ids)) if room else None)), lane="background",
                                  on_token=writing)
-        r["label"] = label
+        r["label"], r["i"] = label, i
         live.BUS.publish({"type": "agent", "run": run_id, "rt": rt, "i": i, "label": label, "state": "done",
                      "ttft_ms": r.get("ttft_ms"), "tok_s": r.get("decode_tok_s"), "cached": r.get("cached_tokens"),
                      "prompt_tokens": r["prompt_tokens"], "tokens": r["n"], "stop": r.get("stop"),

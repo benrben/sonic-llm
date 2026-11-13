@@ -44,7 +44,8 @@
     write: { label: 'Write speed', unit: 'tok/s', keys: ['write_tok_s', 'decode_tok_s', 'agg_tok_s'], live: 'tok_s' },
     writeLoaded: { label: 'Write speed under load', unit: 'tok/s', keys: ['decode_loaded_tok_s'], live: 'tok_s' },
     same: { label: 'Same words?', verdict: 'exact', yes: 'Identical', no: 'Different' },
-    sameParked: { label: 'Same words after parking?', verdict: 'same_as_ram', yes: 'Identical', no: 'Different' }
+    sameParked: { label: 'Same words after parking?', verdict: 'same_as_ram', yes: 'Identical', no: 'Different' },
+    correct: { label: 'Correct', icon: 'i-check', score: true }
   };
   var TILES = {
     chat: ['total', 'first', 'write'], burst: ['total', 'first', 'write'], long: ['total', 'first', 'read', 'write'],
@@ -55,18 +56,43 @@
     for (var i = 0; m && i < slot.keys.length; i++) if (C.num(m[slot.keys[i]])) return m[slot.keys[i]];
     return null;
   }
-  // The tiles a test shows. Once numbers are in (final), a tile no engine has a number for is left out.
+  // The tiles a test shows (and the score of a graded run, last). Once numbers are in (final), a tile no engine has a number for is left out.
   V.tileSlots = function (scenario, final) {
-    var ids = TILES[scenario] || DEFAULT_TILES, done = Object.keys(final || {}).filter(function (rt) { return Object.keys(final[rt]).length; });
+    var done = Object.keys(final || {}).filter(function (rt) { return Object.keys(final[rt]).length; });
+    var ids = (TILES[scenario] || DEFAULT_TILES).concat(done.some(function (rt) { return graded(final[rt]); }) ? ['correct'] : []);
     return ids.map(function (id) { return SLOTS[id]; }).filter(function (slot) {
       if (!done.length) return true;
-      return done.some(function (rt) { return slot.verdict ? typeof final[rt][slot.verdict] === 'boolean' : slotValue(slot, final[rt]) !== null; });
+      return done.some(function (rt) {
+        return slot.score ? graded(final[rt]) : slot.verdict ? typeof final[rt][slot.verdict] === 'boolean' : slotValue(slot, final[rt]) !== null;
+      });
     });
+  };
+
+  // -- a graded run's score: how many answers were right, and in words and icons, never colour alone -----------------------------
+  var GRADE = { 'correct': ['i-check', 'Correct', 'ok'], 'wrong': ['i-no', 'Wrong', 'bad'], 'no answer': ['i-dash', 'No answer', 'none'] };
+  function graded(m) { return !!m && m.graded === true; }
+  function asked(m) { return m.correct + m.wrong + m.empty; }
+  V.verdictWord = function (v) { return GRADE[v] ? GRADE[v][1] : ''; };
+  // the icon and the word of a verdict (`text` instead of the word, for a count: "3 wrong")
+  V.verdictHtml = function (v, text) { var g = GRADE[v]; return g ? '<svg class="ic s g-' + g[2] + '" aria-hidden="true"><use href="#' + g[0] + '"/></svg>' + esc(text || g[1]) : ''; };
+  function scoreDetail(m) { return V.verdictHtml('wrong', m.wrong + ' wrong') + ' ' + V.verdictHtml('no answer', m.empty + ' no answer'); }
+  // One plain line under the verdict: the score of each engine, or why the run is not graded ('' for a run from before grading)
+  V.gradeText = function (final) {
+    var rts = Object.keys(final || {}).filter(function (rt) { return graded(final[rt]); }), a = final.sllm, b = final.llama;
+    if (!rts.length) return Object.keys(final || {}).map(function (rt) { return final[rt] && final[rt].graded_note; }).filter(Boolean)[0] || '';
+    var note = (final[rts[0]].graded_note ? ' ' + final[rts[0]].graded_note : '');
+    if (rts.length === 1) return C.SERIES[rts[0]].label + ' got ' + final[rts[0]].correct + ' of ' + asked(final[rts[0]]) + ' right.' + note;
+    return (a.correct === b.correct && asked(a) === asked(b) ? 'Both engines got ' + a.correct + ' of ' + asked(a) + ' right.' :
+      'Sonic LLM ' + a.correct + ', llama.cpp ' + b.correct + ' of ' + asked(a) + ' right.') + note;
   };
 
   // One engine's reading for a slot: {text, unit, raw, live}: its own number, else the live one, else a dash.
   function reading(slot, rt, o) {
     var m = (o.final || {})[rt], now = (o.live || {})[rt];
+    if (slot.score) {
+      return graded(m) ? { text: m.correct + ' of ' + asked(m), unit: Math.round(100 * m.correct / Math.max(1, asked(m))) + '%', raw: null, live: scoreDetail(m) } :
+        { text: '–', unit: '', raw: null, live: '' };
+    }
     if (slot.verdict) {
       var b = m && m[slot.verdict];
       return { text: typeof b === 'boolean' ? (b ? slot.yes : slot.no) : '–', unit: '', raw: null, live: '' };
@@ -86,8 +112,8 @@
     var many2 = o.rts.length > 1;
     return V.tileSlots(o.scenario, o.final).map(function (slot) {
       var rs = o.rts.map(function (rt) { return reading(slot, rt, o); });
-      var cmp = many2 && !slot.verdict && rs[0].raw !== null && rs[1].raw !== null ? V.compare(rs[0].raw, rs[1].raw, slot.lower) : null;
-      return '<div class="tile"><h4>' + esc(slot.label) + '</h4>' + rs.map(function (r, i) { return rowHtml(slot, o.rts[i], r, many2); }).join('') +
+      var cmp = many2 && !slot.verdict && !slot.score && rs[0].raw !== null && rs[1].raw !== null ? V.compare(rs[0].raw, rs[1].raw, slot.lower) : null;
+      return '<div class="tile"><h4>' + (slot.icon ? '<svg class="ic s" aria-hidden="true"><use href="#' + slot.icon + '"/></svg>' : '') + esc(slot.label) + '</h4>' + rs.map(function (r, i) { return rowHtml(slot, o.rts[i], r, many2); }).join('') +
         '<div class="t-ratio ' + (cmp ? cmp.tone : '') + '">' + (cmp ? esc(cmp.text) : '') + '</div></div>';
     }).join('');
   };
@@ -130,11 +156,12 @@
   // Two short pills for the history list: the headline of a saved run.
   V.headlines = function (rec) {
     var rts = Object.keys(rec.metrics || {}).filter(function (rt) { return Object.keys(rec.metrics[rt]).length; });
+    var score = V.gradeText(rec.metrics || {});
     return ['write', 'total'].map(function (id) {
       var slot = SLOTS[id], vals = rts.map(function (rt) { return slotValue(slot, rec.metrics[rt]); });
       if (rts.length > 1 && rts[0] === 'sllm') { var c = V.compare(vals[0], vals[1], slot.lower); if (c) return slot.label + ' ' + c.text; }
       return vals[0] !== null && vals[0] !== undefined ? slot.label + ' ' + V.valueText(vals[0], slot.unit) : '';
-    }).filter(Boolean);
+    }).concat(rts.some(function (rt) { return graded(rec.metrics[rt]); }) ? [score] : []).filter(Boolean);
   };
 
   // -- notes under an answer ------------------------------------------------------------------------------------------

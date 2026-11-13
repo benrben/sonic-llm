@@ -22,7 +22,7 @@
     $('runTitle').textContent = title; $('runSub').textContent = sub; $('elapsed').textContent = '';
     $('runAsk').hidden = !ask; $('runAsk').textContent = ask || '';
     $('messages').innerHTML = ''; S.runs = {}; S.swarm = {}; S.final = {}; S.live = {}; S.tilesHtml = ''; $('last').innerHTML = '';
-    $('swarm').innerHTML = ''; $('swarmNote').textContent = ''; $('runVerdict').hidden = true;
+    $('swarm').innerHTML = ''; $('swarmNote').textContent = ''; $('runVerdict').hidden = true; $('runGrade').hidden = true;
   }
   function subtitle(r, rts) {
     var bits = [S.session ? S.session.model : ''];
@@ -73,6 +73,7 @@
       setRunState(how);
       Object.keys(S.live).forEach(function (rt) { if (S.live[rt].running) S.live[rt].end = Date.now(); S.live[rt].running = false; });
       if (cut) { V.stopCells(S.swarm); renderSwarm(); }
+      applyLists();
       renderTiles();
     }
   };
@@ -90,32 +91,69 @@
   function newAgentRow(run, ev) {
     var box = ans(ev.run, ev.rt); if (!box) return null;
     var row = document.createElement('details'); row.className = 'arow';
-    row.innerHTML = '<summary><span class="st"></span><span class="nm"></span><span class="vd"></span></summary><div class="body"><button class="btn quiet copy" type="button">Copy</button><pre>Nothing yet.</pre></div>';
+    row.innerHTML = '<summary><span class="st"></span><span class="nm"></span><span class="vd"></span></summary><div class="body"><button class="btn quiet copy" type="button">Copy</button>' +
+      '<dl class="facts" hidden></dl><div class="alabel" hidden>Answer</div><pre>Nothing yet.</pre></div>';
     nameRow(row, ev.label);
     box.querySelector('.agentlist').appendChild(row); run.rows[ev.rt + ':' + ev.i] = row;
     return row;
   }
   function nameRow(row, label) {
     row.title = label; row.querySelector('.nm').textContent = label.split('/').pop();
-    row.querySelector('pre').textContent = 'Nothing yet.'; row.classList.remove('bad');
+    row.querySelector('pre').textContent = 'Nothing yet.'; row.classList.remove('bad'); delete row.dataset.grade;
+    row.querySelector('.facts').hidden = row.querySelector('.alabel').hidden = true;
   }
   function showAgentDone(row, ev) {
-    var tok = C.num(ev.tokens) ? many(ev.tokens, 'token') : '', said = agentVerdict(ev);
-    row.querySelector('.vd').textContent = said ? said + ' · ' + tok : tok;
-    row.classList.toggle('bad', ev.ok === false || ev.stop === 'limit' || ev.found === 0);
+    var tok = C.num(ev.tokens) ? many(ev.tokens, 'token') : '', said = agentVerdict(ev), isGraded = ev.expected !== undefined;
+    if (isGraded) { row.dataset.grade = ev.verdict; showFacts(row, ev); }
+    row.querySelector('.vd').innerHTML = isGraded ? V.verdictHtml(ev.verdict) + (tok ? ' · ' + esc(tok) : '') : esc(said ? said + ' · ' + tok : tok);
+    row.classList.toggle('bad', isGraded ? ev.verdict === 'wrong' : ev.ok === false || ev.stop === 'limit' || ev.found === 0);
     row.querySelector('pre').textContent = ev.reply || '(an empty reply)';
+  }
+  // what a graded agent was asked, what it should have said and how it came out, above its whole answer
+  function showFacts(row, ev) {
+    var checks = ev.checks ? ' (' + Object.keys(ev.checks).map(function (k) { return k + ' ' + (ev.checks[k] ? 'right' : 'wrong'); }).join(', ') + ')' : '';
+    var rows = [['Document', ev.document.split('/').pop()], ['Question', ev.question], ['Expected', ev.expected]];
+    row.querySelector('.facts').innerHTML = rows.map(function (r) { return '<dt>' + r[0] + '</dt><dd>' + esc(r[1]) + '</dd>'; }).join('') +
+      '<dt>Verdict</dt><dd>' + V.verdictHtml(ev.verdict) + esc(checks) + '</dd>';
+    row.querySelector('.facts').hidden = row.querySelector('.alabel').hidden = false;
   }
   // what an agent's job came to: the run's verdict, the questions it answered, or a reply cut at the limit
   function agentVerdict(ev) {
     return ev.verdict || (C.num(ev.found) ? 'answered ' + ev.found + ' of ' + ev.of : '') || (ev.stop === 'limit' ? 'cut at the length limit' : '');
   }
+  // The answers of one engine: all of them, or the wrong / unanswered ones, PAGE rows at a time (256 agents stay light to scroll).
+  var PAGE = 50;
+  function applyList(box) {
+    var rows = Array.prototype.slice.call(box.querySelectorAll('.arow')), st = box.listState = box.listState || { filter: 'all', page: 0 };
+    var graded = rows.some(function (r) { return r.dataset.grade; });
+    var match = rows.filter(function (r) { return st.filter === 'all' || r.dataset.grade === st.filter; });
+    var pages = Math.max(1, Math.ceil(match.length / PAGE)); st.page = Math.min(st.page, pages - 1);
+    var shown = match.slice(st.page * PAGE, (st.page + 1) * PAGE);
+    rows.forEach(function (r) { r.hidden = shown.indexOf(r) < 0; });
+    var head = box.querySelector('.alist-h'); head.hidden = !(graded || rows.length > PAGE);
+    head.querySelector('.filter').hidden = !graded;
+    head.querySelector('.pager').hidden = match.length <= PAGE;
+    head.querySelector('.pg').textContent = match.length ? (st.page * PAGE + 1) + '–' + (st.page * PAGE + shown.length) + ' of ' + match.length : 'none';
+    head.querySelector('[data-page="-1"]').disabled = st.page === 0; head.querySelector('[data-page="1"]').disabled = st.page >= pages - 1;
+    box.querySelector('.agentlist').dataset.empty = match.length ? '' : 'No answer matches.';
+  }
+  $('messages').addEventListener('change', function (e) {
+    var box = e.target.closest && e.target.closest('.answer'); if (!box || e.target.name.indexOf('afilter-') !== 0) return;
+    box.listState = { filter: e.target.value, page: 0 }; applyList(box);
+  });
+  $('messages').addEventListener('click', function (e) {
+    var b = e.target.closest && e.target.closest('[data-page]'), box = b && b.closest('.answer'); if (!box) return;
+    box.listState.page += +b.dataset.page; applyList(box);
+  });
+  function applyLists() { Array.prototype.forEach.call($('messages').querySelectorAll('.answer'), applyList); }
+
   var swarmTimer = null;
   App.onAgent = function (ev) {
     S.swarm[ev.rt] = S.swarm[ev.rt] || {};
     if (S.view.run && S.view.run.elsewhere) $('swarmCard').hidden = false;  // its test is not known: its agents say it
     S.swarm[ev.rt][ev.i] = ev;
     agentRow(ev);
-    if (!swarmTimer) swarmTimer = setTimeout(function () { swarmTimer = null; renderSwarm(); }, 150);
+    if (!swarmTimer) swarmTimer = setTimeout(function () { swarmTimer = null; renderSwarm(); applyLists(); }, 150);
   };
   function renderSwarm() {
     var all = [], html = Object.keys(S.swarm).map(function (rt) {
@@ -126,6 +164,7 @@
       return V.swarmRowHtml(rt, ids.map(function (i) { return agents[i]; }), done);
     }).join('');
     $('swarm').innerHTML = html;
+    $('legendGrade').hidden = !Object.keys(S.swarm).some(function (rt) { return Object.keys(S.swarm[rt]).some(function (i) { return S.swarm[rt][i].verdict; }); });
     $('swarmNote').textContent = Object.keys(S.swarm).length > 1 ? '' : V.countText(all);
   }
   $('messages').addEventListener('click', function (e) {
@@ -140,6 +179,7 @@
     if (html !== S.tilesHtml) { S.tilesHtml = html; $('tiles').innerHTML = html; }
     $('tileKey').hidden = S.stage.rts.length < 2;
     var said = V.verdictText(S.final); $('runVerdict').hidden = !said; $('runVerdict').textContent = said;
+    var score = V.gradeText(S.final); $('runGrade').hidden = !score; $('runGrade').textContent = score;
   }
   App.renderTiles = renderTiles;
   // the numbers of one engine when it is done: they replace its live readings

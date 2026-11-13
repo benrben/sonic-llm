@@ -6,12 +6,14 @@ own folder inside the data folder. Only plain text and code files are offered (T
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
 from . import settings
 
 TEXT_EXT = {".md", ".txt", ".json", ".csv", ".py", ".rs", ".toml", ".yaml", ".yml"}
+KEY_FILE = "answers.json"  # in the samples folder: the answer key of the samples (tools/make_samples.py), not a document
 MAX_UPLOAD_BYTES = 2_000_000
 _SAFE_NAME = re.compile(r"[^\w.\- ]+")
 
@@ -26,16 +28,36 @@ def _roots() -> dict[str, Path]:
 
 
 def list_files() -> list[dict]:
-    """Every document: {path, bytes, est_tokens} (about 4 bytes of text to a token), samples first."""
-    out = []
+    """Every document: {path, bytes, est_tokens (about 4 bytes of text to a token), keyed (it has an answer key)}, samples first."""
+    out, keyed = [], answer_key().get("documents") or {}
     for folder, root in _roots().items():
         if not root.is_dir():
             continue
         for p in sorted(root.rglob("*")):
-            if p.is_file() and p.suffix.lower() in TEXT_EXT:
+            if p.is_file() and p.suffix.lower() in TEXT_EXT and not (folder == "samples" and p.name == KEY_FILE):
                 n = p.stat().st_size
-                out.append({"path": f"{folder}/{p.relative_to(root).as_posix()}", "bytes": n, "est_tokens": n // 4})
+                out.append({"path": f"{folder}/{p.relative_to(root).as_posix()}", "bytes": n, "est_tokens": n // 4,
+                            "keyed": folder == "samples" and p.name in keyed})
     return out
+
+
+_KEYS: dict = {"path": None, "mtime": None, "key": {}}  # the answer key read last, and the file it came from
+
+
+def answer_key() -> dict:
+    """The answer key of the samples: {"labels": [...], "documents": {file name: {kind, fields, questions}}}. Empty when the
+    samples have no key (a folder of your own). Read again when the file changes. A damaged key raises: grading would be wrong."""
+    path = settings.get().samples_dir / KEY_FILE
+    mtime = path.stat().st_mtime_ns if path.is_file() else None
+    if _KEYS["path"] != path or _KEYS["mtime"] != mtime:
+        _KEYS.update(path=path, mtime=mtime, key=json.loads(path.read_text(encoding="utf-8")) if mtime else {})
+    return _KEYS["key"]
+
+
+def key_of(rel: str) -> dict | None:
+    """The answer key of document `rel` ("samples/<file>"), None for a document without one (your own files)."""
+    folder, _, name = rel.partition("/")
+    return (answer_key().get("documents") or {}).get(name) if folder == "samples" else None
 
 
 def read_file(rel: str, limit: int | None = None) -> str:

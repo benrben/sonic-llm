@@ -19,20 +19,33 @@
   V.runHtml = function (rts) {
     return '<div class="answers ' + (rts.length > 1 ? 'two' : '') + '">' + rts.map(function (rt) {
       return '<div class="answer" data-rt="' + rt + '"><div class="who"><i class="swatch ' + rt + '"></i>' + C.SERIES[rt].label +
-        '<span class="state">waiting</span></div><div class="thought"></div><div class="text"></div><div class="agentlist"></div><div class="stats"></div></div>';
+        '<span class="state">waiting</span></div><div class="thought"></div><div class="text"></div>' + listHeadHtml(rt) + '<div class="agentlist"></div><div class="stats"></div></div>';
     }).join('') + '</div>';
   };
+
+  // above the agents' answers: the filter (graded runs) and the pages (more than a page of agents), both hidden until needed
+  function listHeadHtml(rt) {
+    var filter = [['all', 'all'], ['wrong', 'wrong only'], ['no answer', 'no answer']].map(function (f, i) { return radio('afilter-' + rt, f[0], i === 0, f[1]); }).join('');
+    return '<div class="alist-h" hidden><div class="seg filter" role="radiogroup" aria-label="Show answers">' + filter + '</div>' +
+      '<span class="pager"><button class="btn quiet" type="button" data-page="-1">Previous</button><span class="pg" role="status"></span><button class="btn quiet" type="button" data-page="1">Next</button></span></div>';
+  }
 
   // -- what pressing Run will really do, in one line ------------------------------------------------------------------
   // k: n documents picked, a agents, perFile (one agent per document), first (the first picked document's name), files (in the
   // library), max (the most agents), par (the agents-at-once limit, or null), maxThink (gpt-oss thinking max), level (the
-  // answer level; 'off' for gpt-oss, which has its thinking instead). Gives {t: the text, warn}.
+  // answer level; 'off' for gpt-oss, which has its thinking instead), grade ('yes', 'follow', 'typed', 'unkeyed' or ''), room (the
+  // most agents at once on this test, or null), compare (llama.cpp runs too). Gives {t: the text, warn}.
   V.planText = function (id, k) {
     var p = k.perFile ? perFilePlan(id, k) : { t: PLAN[id] ? PLAN[id](k.n, k.a, k) : k.n ? 'Your ' + many(k.n, 'document') + ' go with this message.' : '', warn: false };
     if (k.maxThink && k.perFile) { p.t += ' Thinking max: replies have no length limit.'; p.warn = true; }
+    if (k.grade) p.t += GRADE_PLAN[k.grade];
+    if (k.room && k.a > k.room) { p.t += ' More than ' + k.room + ' agents do not all fit in memory at once: the rest wait for a free slot or read less of their document.'; p.warn = true; }
+    if (k.compare && k.a > 64) { p.t += ' With llama.cpp compared, a run of this many agents takes much longer.'; p.warn = true; }
     if (k.level !== 'off') p.t += V.LEVEL_FREE.indexOf(id) >= 0 ? ' Answer levels do not apply to this test.' : ' Answer level: ' + k.level + '.';
     return p;
   };
+  var GRADE_PLAN = { yes: ' Graded: each answer is checked against an answer key.', follow: ' Graded if the last swarm or team was.',
+    typed: ' Not graded: you wrote your own question.', unkeyed: ' Not graded: some documents have no answer key.' };
   function perFilePlan(id, k) {
     var n = k.n, a = k.a;
     if (n) return { t: 'Will run ' + many(a, 'agent') + ', one per document.' + (n > k.max ? ' Only the first ' + k.max + ' documents.' : ''), warn: false };
@@ -97,10 +110,15 @@
   };
   function cellTitle(a) {
     if (a.state !== 'done') return a.label + ' · ' + a.state + (C.num(a.tokens) ? ' · ' + many(a.tokens, 'token') : '');
-    return a.label + ' · first word ' + V.valueText(a.ttft_ms, 'ms') + ' · ' + C.fmt(a.tok_s) + ' tokens per second' + (C.num(a.cached) ? ' · ' + a.cached + ' tokens from memory' : '') + (C.num(a.found) ? ' · answered ' + a.found + ' of ' + a.of : '');
+    return a.label + ' · first word ' + V.valueText(a.ttft_ms, 'ms') + ' · ' + C.fmt(a.tok_s) + ' tokens per second' + (C.num(a.cached) ? ' · ' + a.cached + ' tokens from memory' : '') + (C.num(a.found) ? ' · answered ' + a.found + ' of ' + a.of : '') + (CELL[a.verdict] ? ' · ' + V.verdictWord(a.verdict) : '');
   }
-  // a research agent that found nothing is hollow, one that found some of its questions is faded
-  function cellKind(a) { return a.state === 'done' && C.num(a.found) ? (a.found === 0 ? ' none' : a.found < a.of ? ' part' : '') : ''; }
+  // a graded agent shows its verdict (a check, a cross or a dash in the tile); a research agent that found nothing is hollow, one
+  // that found some of its questions is faded
+  var CELL = { 'correct': 'ok', 'wrong': 'bad', 'no answer': 'none' };
+  function cellKind(a) {
+    if (a.state === 'done' && a.verdict && CELL[a.verdict]) return ' v-' + CELL[a.verdict];
+    return a.state === 'done' && C.num(a.found) ? (a.found === 0 ? ' none' : a.found < a.of ? ' part' : '') : '';
+  }
 
   // The model picker: the models found (ms), each with its size.
   V.modelOptionsHtml = function (ms) {

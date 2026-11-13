@@ -22,6 +22,7 @@
     Array.prototype.forEach.call($('filesList').querySelectorAll('[data-partial]'), function (x) { x.indeterminate = true; });
     var tok = S.picked.reduce(function (a, p) { var f = S.files.filter(function (x) { return x.path === p; })[0]; return a + (f ? f.est_tokens : 0); }, 0);
     $('filesSel').textContent = S.picked.length ? many(S.picked.length, 'document') + ' picked · about ' + C.fmt(tok) + ' tokens' : 'None picked: the tests use the biggest documents';
+    $('pickAll').textContent = 'Pick all ' + S.files.length;
     $('nfiles').textContent = S.picked.length ? many(S.picked.length, 'document') + ' picked' : 'Choose documents';
     $('attach').title = S.picked.map(function (p) { return p.split('/').pop(); }).join(', ');
   }
@@ -39,6 +40,12 @@
   App.closeOnBackdrop($('files'));
   $('filesClose').onclick = $('filesDone').onclick = function () { $('files').close(); };
   $('files').onclose = App.renderAttached;
+  // shortcuts: the first n documents of the library (samples come first), or all of them (0)
+  $('pickFirst').onclick = function (e) {
+    var b = e.target.closest && e.target.closest('[data-first]'); if (!b) return;
+    var n = +b.dataset.first || S.files.length;
+    S.picked = S.files.slice(0, n).map(function (f) { return f.path; }); App.renderAttached();
+  };
   $('filesNone').onclick = function () { S.picked = []; App.renderAttached(); };
   $('filesSearch').oninput = renderFiles;
   $('filesList').onclick = function (e) {
