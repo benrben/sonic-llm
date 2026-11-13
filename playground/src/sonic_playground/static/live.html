@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sonic LLM playground</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/static/live.css">
+</head>
+<body class="live">
+<header class="top">
+  <a class="brand" href="/"><span class="logo">◆</span> Sonic LLM playground</a>
+  <div class="modelbar">
+    <select id="model" aria-label="Model"></select>
+    <button id="load" class="primary">Load</button>
+    <button id="modelsBtn" class="ghost" title="Download models, search Hugging Face, remove models">Get models</button>
+    <button id="stop" class="ghost" hidden title="Free the model's memory and the GPU">Unload</button>
+    <div class="popwrap">
+      <button id="optBtn" class="ghost" aria-expanded="false" aria-controls="optPanel">Options ▾</button>
+      <div class="pop down" id="optPanel" hidden>
+        <h3>Model options</h3>
+        <p class="small muted">These apply when you load a model.</p>
+        <label class="field">Memory limit per engine, GiB
+          <input type="number" id="limKv" min="1" step="0.5" placeholder="all that fits"></label>
+        <label class="check"><input type="checkbox" id="compare"> Compare with llama.cpp: run everything on both</label>
+        <p class="small muted" id="compareNote"></p>
+        <div id="limits" class="small loaded"></div>
+      </div>
+    </div>
+    <span id="status" class="chip">No model loaded</span>
+    <button id="exactChip" class="chip" hidden></button>
+  </div>
+</header>
+
+<main class="split">
+  <!-- left: the work -->
+  <section class="chat">
+    <div class="banner" id="banner" role="status" hidden></div>
+    <div id="messages" class="messages" aria-live="polite">
+      <div class="welcome" id="welcome">
+        <h1>Pick a task, add files if it reads documents, and run it.</h1>
+        <ol>
+          <li><b>Model:</b> pick one at the top. Pressing Send loads it for you.</li>
+          <li><b>Task:</b> chat, document jobs, agents or engine tests, in the menu below.</li>
+          <li><b>Files:</b> tick the sample documents, or add your own.</li>
+        </ol>
+      </div>
+    </div>
+
+    <div class="suggest" id="suggest"></div>
+
+    <div class="composer">
+      <div class="ctrls">
+        <div class="popwrap">
+          <button id="taskBtn" class="task" aria-expanded="false" aria-controls="taskMenu"><span id="taskName">Chat</span> ▾</button>
+          <div class="pop up wide" id="taskMenu" role="menu" aria-label="Task" hidden></div>
+        </div>
+        <button id="attach" class="ghost" title="Pick files from the library">📎 <span id="nfiles">Files</span></button>
+        <div class="attached" id="attached"></div>
+        <label class="agentsbox" id="agentsRow" hidden>Agents <input type="number" id="agents" min="1" max="256" step="1" value="256"></label>
+        <span class="grow"></span>
+        <div class="popwrap">
+          <button id="setBtn" class="ghost" aria-expanded="false" aria-controls="setPanel">Settings<span id="setNote"></span> ▾</button>
+          <div class="pop up right wide" id="setPanel" hidden>
+            <h3 id="thinkHead">Answer level</h3>
+            <div class="seg" id="think" role="radiogroup" aria-label="Thinking"></div>
+            <p class="small muted" id="thinkWhat"></p>
+            <h3>Limits <span class="muted small" id="limitsSet"></span></h3>
+            <div class="limgrid">
+              <label>Agents at once (more = less context each)<input type="number" id="limPar" min="1" max="256" placeholder="all at once"></label>
+              <label>Context per agent<input type="number" id="limCtx" min="512" step="512" placeholder="most that fits"></label>
+              <label>Chat / manager answer<input type="number" id="limAnswer" min="16" placeholder="until the model stops"></label>
+              <label>Agent answer<input type="number" id="limAgent" min="16" placeholder="until the model stops"></label>
+              <label>Characters read per document<input type="number" id="limDoc" min="200" placeholder="whole document"></label>
+              <button class="link" id="limClear">Clear limits</button>
+            </div>
+          </div>
+        </div>
+        <button id="reset" class="link">New chat</button>
+      </div>
+      <div class="row">
+        <textarea id="input" rows="2" aria-label="Message"></textarea>
+        <button id="send" class="primary">Send</button>
+      </div>
+      <div class="plan small" id="plan"></div>
+    </div>
+  </section>
+
+  <!-- right: the engine -->
+  <section class="viz viz-root" aria-label="Live metrics">
+    <div class="card vizempty" id="vizEmpty">Load a model to see its speed, GPU and memory live.</div>
+    <div class="tiles" id="tiles"></div>
+    <div class="card" id="swarmCard" hidden>
+      <div class="card-h"><h2>Agents</h2><span class="small muted" id="swarmNote"></span></div>
+      <div id="swarm"></div>
+    </div>
+    <div class="chartgrid" id="charts">
+      <div class="card">
+        <div class="card-h"><h2>Writing</h2><div class="legend" id="legendTok"></div><span class="small muted">tok/s</span></div>
+        <div class="chart" id="chartTok"></div>
+      </div>
+      <div class="card">
+        <div class="card-h"><h2>Reading</h2><span class="small muted">tok/s</span></div>
+        <div class="chart" id="chartRead"></div>
+      </div>
+      <div class="card">
+        <div class="card-h"><h2>GPU busy</h2><span class="small muted" id="gpuNote">%</span></div>
+        <div class="chart" id="chartGpu"></div>
+      </div>
+      <div class="card">
+        <div class="card-h"><h2>Memory</h2><span class="small muted" id="memNote"></span></div>
+        <div class="chart" id="chartMem"></div>
+      </div>
+    </div>
+    <div class="card" id="lastCard" hidden>
+      <div class="card-h"><h2 id="lastTitle">Last run</h2></div>
+      <div id="last"></div>
+    </div>
+    <details class="card log"><summary>Event log</summary><div id="log"></div></details>
+  </section>
+</main>
+
+<!-- file library -->
+<dialog id="files">
+  <div class="dlg-h"><h2>Pick files</h2><span class="small muted" id="filesRoot">Samples and your own files</span><button class="ghost" id="filesClose" aria-label="Close">✕</button></div>
+  <div class="row"><input id="filesSearch" placeholder="Search files…" aria-label="Search files"></div>
+  <div id="filesList" class="fileslist"></div>
+  <div class="row dropzone" id="drop">
+    <span class="small muted">Add your own text files: drop them here or</span>
+    <input type="file" id="upload" multiple accept=".md,.txt,.json,.csv,.py,.rs,.toml,.yaml,.yml" aria-label="Add text files">
+  </div>
+  <div class="dlg-f"><span class="small muted" id="filesSel"></span><button id="filesNone" class="link">Clear</button>
+    <button id="filesDone" class="primary">Done</button></div>
+</dialog>
+
+<!-- models: recommended, search, a link of your own, downloads, installed -->
+<dialog id="models">
+  <div class="dlg-h"><h2>Models</h2><span class="small muted" id="modelsDir"></span><button class="ghost" id="modelsClose" aria-label="Close">✕</button></div>
+  <p class="small warnline" id="modelsOffline" hidden>Offline mode is on (SONIC_PLAYGROUND_OFFLINE): search and downloads are off. Models in your models folder still work.</p>
+  <div id="modelsOnline">
+    <h3>Recommended</h3>
+    <div id="recList" class="mlist"></div>
+    <h3>Search Hugging Face</h3>
+    <div class="row"><input id="hubSearch" placeholder="Model name, for example qwen3 or llama 3.1…" aria-label="Search Hugging Face for GGUF models"></div>
+    <p class="small muted" id="hubStatus"></p>
+    <div id="hubResults" class="mlist"></div>
+    <div id="hubFiles"></div>
+    <h3>Your own link</h3>
+    <div class="row"><input id="customSrc" placeholder="https://huggingface.co/owner/repo/resolve/main/file.gguf, or owner/repo" aria-label="Link or owner/repo">
+      <input id="customFile" placeholder="file name, if you gave owner/repo" aria-label="File name" size="24"><button id="customGo" class="primary">Download</button></div>
+  </div>
+  <h3>Downloads</h3>
+  <div id="dlList" class="mlist"><span class="small muted">None yet.</span></div>
+  <h3>On this computer</h3>
+  <div id="installedList" class="mlist"></div>
+  <p class="small muted">A model that needs a Hugging Face account: start the playground with HF_TOKEN set. The token is sent only to huggingface.co and is not stored.</p>
+</dialog>
+
+<div id="tip" class="tip" hidden></div>
+<script src="/static/charts.js"></script>
+<script src="/static/liveview.js"></script>
+<script src="/static/live.js"></script>
+<script src="/static/models.js"></script>
+</body>
+</html>
