@@ -289,11 +289,24 @@ def test_graded_swarm_shows_the_score_the_answers_and_the_wrong_only_filter(play
         most = int(page.locator("#agentRoom").inner_text().split("up to ")[1].split(" ")[0])
         assert 8 < most <= 256 and "Graded" in page.locator("#plan").inner_text()
 
-        # the documents window: shortcuts and a count
+        # the difficulty of a graded test: medium, hard or mixed (the default); there is no easy level in the library
+        assert page.locator("#difficulty label").all_inner_texts() == ["Medium", "Hard", "Mixed"]
+        assert page.locator("#difficulty input:checked").get_attribute("value") == "mixed"
+        page.click("#difficulty label:has-text('Hard')")
+        assert "Difficulty: hard" in page.locator("#plan").inner_text()
+
+        # the documents window: shortcuts by count, by length and by case, and a count
         page.click("#attach")
         page.click("#pickFirst [data-first='32']")
         assert "32 documents picked" in page.locator("#filesSel").inner_text()
         assert page.locator("#pickAll").inner_text() == "Pick all 256"
+        page.click("#pickSize [data-size='short']")
+        assert "86 documents picked" in page.locator("#filesSel").inner_text()
+        page.click("#pickSize [data-size='long']")
+        assert "85 documents picked" in page.locator("#filesSel").inner_text()
+        page.select_option("#pickCase", index=1)
+        assert "4 documents picked" in page.locator("#filesSel").inner_text()
+        page.click("#pickFirst [data-first='32']")
         page.keyboard.press("Escape")
         assert page.locator("#nfiles").inner_text() == "32 documents picked" and page.locator("#agents").input_value() == "32"
 
@@ -306,6 +319,7 @@ def test_graded_swarm_shows_the_score_the_answers_and_the_wrong_only_filter(play
         
         score = " ".join(page.locator("#tiles .tile:has-text('Correct')").inner_text().split())
         assert "0 of 32" in score and "0%" in score and "32 wrong" in score and "0 no answer" in score
+        assert "hard 0/32" in score and "medium" not in score and "easy" not in score  # only the level that was asked, in the Correct tile
         assert page.locator("#runGrade").inner_text() == "Sonic LLM got 0 of 32 right."
         assert page.locator("#swarm .cell.v-bad").count() == 32 and page.locator("#legendGrade").is_visible()
 
@@ -313,6 +327,7 @@ def test_graded_swarm_shows_the_score_the_answers_and_the_wrong_only_filter(play
         page.locator("#messages .arow summary").first.click()
         facts = page.locator("#messages .arow[open] .facts").first.inner_text()
         assert "Document" in facts and "Question" in facts and "Expected" in facts and "Verdict" in facts and "Wrong" in facts
+        assert "Why" in facts and "Level" in facts and "hard" in facts  # the reason a wrong answer is wrong, and the question's level and skill
         assert page.locator("#messages .arow[open] pre").first.inner_text().strip()
 
         # the filter: wrong only keeps all 32, no answer keeps none
@@ -341,5 +356,6 @@ def test_graded_swarm_shows_the_score_the_answers_and_the_wrong_only_filter(play
         page.click("#historyBtn")
         page.wait_for_function("document.querySelectorAll('#historyList .hitem').length >= 2")
         assert "got 0 of 64 right" in page.locator("#historyList .hitem").first.inner_text()
+        assert "hard 0/64" in page.locator("#historyList .hitem").first.inner_text()  # the history pill shows the hard score too
         browser.close()
     assert not errors, errors

@@ -191,7 +191,7 @@ async def post_reset() -> dict:
 
 @router.get("/files")
 async def get_files() -> dict:
-    return {"files": await asyncio.to_thread(documents.list_files)}
+    return {"files": await asyncio.to_thread(documents.list_files), "cases": await asyncio.to_thread(documents.cases)}
 
 
 @router.put("/files/{name}")

@@ -145,3 +145,33 @@ test('a graded agent is a tile with a mark: a check, a cross or a dash, named in
   assert.match(cell('wrong'), /cell done v-bad" title="[^"]*Wrong/);
   assert.match(cell('no answer'), /cell done v-none" title="[^"]*No answer/);
 });
+
+const BY = { by_level: { medium: [18, 24], hard: [9, 20] }, by_skill: { arithmetic: [3, 9], update: [8, 10] } };
+
+test('the Correct tile breaks the score down by the levels that were asked, and by fields for an extract run', () => {
+  const html = V.tilesHtml({ scenario: 'swarm', rts: ['sllm'], now: 0, live: {}, final: { sllm: { wall_s: 1, ...GRADED, ...BY } } });
+  assert.match(html, /medium 18\/24 · hard 9\/20/);
+  assert.doesNotMatch(html, /easy/);  // a level nobody was asked is not shown
+  assert.equal(V.levelsText({ by_level: { hard: [2, 5] } }), 'hard 2/5');
+  assert.equal(V.levelsText(GRADED), '');  // a run saved before levels existed
+  const extract = V.tilesHtml({ scenario: 'extract', rts: ['sllm'], now: 0, live: {}, final: { sllm: { wall_s: 1, ...GRADED, fields_right: 31, fields_asked: 40 } } });
+  assert.match(extract, /31 of 40 fields right/);
+});
+
+test('All numbers shows the score by skill for each engine, and the history pill shows the hard score', () => {
+  const html = V.skillsTable({ sllm: { ...GRADED, ...BY } }, ['sllm']);
+  assert.match(html, /Right by skill/);
+  assert.match(html, /<th scope="row">arithmetic<\/th><td class="sllm">3 of 9<\/td>/);
+  assert.match(html, /<th scope="row">update<\/th><td class="sllm">8 of 10<\/td>/);
+  assert.equal(V.skillsTable({ sllm: { wall_s: 1 } }, ['sllm']), '');
+  const pills = plain(V.headlines({ metrics: { sllm: { wall_s: 2, ...GRADED, ...BY } } }));
+  assert.ok(pills.includes('Sonic LLM got 61 of 64 right.') && pills.includes('hard 9/20'));
+});
+
+test('the difficulty buttons are medium, hard and mixed, and the plan names the difficulty of a graded run', () => {
+  assert.deepEqual(plain(V.DIFFICULTIES), ['medium', 'hard', 'mixed']);
+  assert.match(V.difficultyHtml('mixed'), /value="mixed" checked/);
+  assert.doesNotMatch(V.difficultyHtml('mixed'), /easy/i);
+  const plan = V.planText('swarm', { n: 8, a: 8, perFile: true, first: 'a.md', files: 256, max: 256, level: 'off', grade: 'yes', difficulty: 'hard' });
+  assert.match(plan.t, /Graded: each answer is checked against an answer key\. Difficulty: hard\./);
+});

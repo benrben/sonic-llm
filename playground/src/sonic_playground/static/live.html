@@ -109,6 +109,11 @@
           <button class="btn" id="agentsMax" type="button" hidden>Max</button>
           <span class="room small muted" id="agentRoom" role="status"></span>
         </div>
+        <div id="diffBox" hidden>
+          <span class="label small" id="diffHead">Difficulty</span>
+          <div class="seg" id="difficulty" role="radiogroup" aria-labelledby="diffHead"></div>
+          <p class="hint" id="diffWhat"></p>
+        </div>
         <div id="levelBox" hidden>
           <span class="label small" id="thinkHead">Answer level</span>
           <div class="seg" id="think" role="radiogroup" aria-labelledby="thinkHead"></div>
@@ -175,6 +180,9 @@
   <input id="filesSearch" type="search" placeholder="Search documents" aria-label="Search documents">
   <div class="pickrow" id="pickFirst">
     <button class="btn" type="button" data-first="8">Pick first 8</button><button class="btn" type="button" data-first="32">Pick first 32</button><button class="btn" type="button" data-first="64">Pick first 64</button><button class="btn" type="button" data-first="0" id="pickAll">Pick all</button></div>
+  <div class="pickrow" id="pickSize" aria-label="Pick by length">
+    <button class="btn" type="button" data-size="short">Short only</button><button class="btn" type="button" data-size="medium">Medium only</button><button class="btn" type="button" data-size="long">Long only</button>
+    <label class="casepick">Or one case <select id="pickCase" aria-label="Pick the documents of one case"><option value="">Pick a case…</option></select></label></div>
   <div id="filesList" class="fileslist"></div>
   <div class="dropzone" id="drop">
     <svg class="ic" aria-hidden="true"><use href="#i-upload"/></svg>

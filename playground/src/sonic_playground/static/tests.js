@@ -4,7 +4,7 @@
   'use strict';
   var App = window.App, S = App.S, $ = App.$, V = App.V, esc = App.esc, isIn = App.isIn;
   var PER_FILE = ['swarm', 'team', 'relay', 'classify', 'extract', 'compress', 'summarize'];  // one agent per picked document
-  var GRADED = ['swarm', 'team', 'followup', 'shared', 'classify', 'extract'];  // tests the sample documents' answer key can grade
+  var GRADED = ['swarm', 'team', 'followup', 'shared', 'classify', 'extract', 'long'];  // tests the sample documents' answer key can grade
   // Chat attaches documents to one message; every other test works on one set, kept while you move between them.
   function fileSet(id) { return id === 'chat' ? 'chat' : 'jobs'; }
   App.fileSet = fileSet;
@@ -27,6 +27,7 @@
     $('input').placeholder = sc.ask || (sc.id === 'team' ? 'One question per line (Shift+Enter for a new line)' : 'Type here');
     $('docsBox').hidden = !n.docs; $('docsLabel').textContent = n.docs || '';
     $('levelBox').hidden = !(n.level || thinkLegacy());
+    $('diffBox').hidden = !isIn(GRADED, sc.id); showDifficulty();
     renderSuggest(); renderAgents(); renderPlan(); App.renderSend();
   }
   $('tests').addEventListener('change', function (e) {
@@ -87,11 +88,19 @@
     if (document.activeElement !== $('agents')) $('agents').value = agentCount();
     renderRoom();
   }
+  // -- difficulty of the graded tests: the questions the answer key asks (medium, hard, or both in turns) ------------------------------------
+  function showDifficulty() {
+    $('difficulty').innerHTML = V.difficultyHtml(S.difficulty); $('diffWhat').textContent = V.DIFFICULTY_WHAT[S.difficulty];
+  }
+  var savedDiff = App.store('difficulty'); if (savedDiff && V.DIFFICULTIES.indexOf(savedDiff) >= 0) S.difficulty = savedDiff;
+  $('difficulty').addEventListener('change', function (e) { S.difficulty = e.target.value; App.store('difficulty', S.difficulty); showDifficulty(); renderPlan(); });
+
   // Will the run be graded? The tests with a right answer are, on documents that have a key and with no question of your own.
   function gradeKind(id, agents) {
     if (!isIn(GRADED, id)) return '';
     if ($('input').value.trim() && id !== 'shared') return 'typed';
     if (id === 'followup') return 'follow';
+    if (id === 'long' && !S.picked.length) return '';  // the long document is graded on picked samples only
     var byPath = {}; S.files.forEach(function (f) { byPath[f.path] = f; });
     var docs = S.picked.length ? S.picked.map(function (p) { return byPath[p]; }) : S.files.slice().sort(function (a, b) { return b.bytes - a.bytes; }).slice(0, agents);
     if (id === 'shared') docs = docs.slice(0, 1);
@@ -102,7 +111,7 @@
     var id = App.cur().id, legacy = thinkLegacy(), n = S.picked.length, a = agentCount(), room = roomNow();
     var p = V.planText(id, { n: n, a: a, perFile: isIn(PER_FILE, id), first: n ? S.picked[0].split('/').pop() : '', files: S.files.length,
       max: App.MAX_AGENTS, par: App.lim('limPar'), maxThink: legacy && V.THINK[S.think] === 'max', level: legacy ? 'off' : S.level,
-      grade: gradeKind(id, a), room: room && room.max > 1 ? room.max : null, compare: !!(S.session && S.session.compare) });
+      grade: gradeKind(id, a), difficulty: S.difficulty, room: room && room.max > 1 ? room.max : null, compare: !!(S.session && S.session.compare) });
     $('plan').textContent = p.t; $('plan').className = 'plan' + (p.warn ? ' warn' : '');
   }
   App.renderPlan = renderPlan; App.renderAgents = renderAgents;
@@ -128,7 +137,7 @@
   // Max: one agent per document tests pick that many documents, the others set the number of agents
   $('agentsMax').onclick = function () {
     var room = roomNow(); if (!room) return;
-    if (isIn(PER_FILE, App.cur().id)) { S.picked = S.files.slice(0, room.max).map(function (f) { return f.path; }); App.renderAttached(); return; }
+    if (isIn(PER_FILE, App.cur().id)) { S.picked = (S.picked.length ? S.picked : S.files.map(function (f) { return f.path; })).slice(0, room.max); App.renderAttached(); return; }
     S.agents = String(room.max); renderAgents(); renderPlan();
   };
   $('agents').oninput = function () { S.agents = $('agents').value; renderPlan(); };
@@ -186,7 +195,7 @@
   }
   function send(text) {
     var sc = App.cur();
-    var body = { scenario: sc.id, message: text, files: S.picked.slice(), agents: agentCount() };
+    var body = { scenario: sc.id, message: text, files: S.picked.slice(), agents: agentCount(), difficulty: S.difficulty };
     if (thinkLegacy()) body.thinking = V.THINK[S.think]; else { body.thinking = 'off'; body.level = S.level; }
     [['limPar', 'parallel'], ['limCtx', 'ctx'], ['limAnswer', 'answer_tokens'], ['limAgent', 'agent_tokens'], ['limDoc', 'doc_chars']].forEach(function (p) {
       var v = App.lim(p[0]); if (v) body[p[1]] = v;

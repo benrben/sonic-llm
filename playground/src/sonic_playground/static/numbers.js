@@ -76,6 +76,15 @@
   // the icon and the word of a verdict (`text` instead of the word, for a count: "3 wrong")
   V.verdictHtml = function (v, text) { var g = GRADE[v]; return g ? '<svg class="ic s g-' + g[2] + '" aria-hidden="true"><use href="#' + g[0] + '"/></svg>' + esc(text || g[1]) : ''; };
   function scoreDetail(m) { return V.verdictHtml('wrong', m.wrong + ' wrong') + ' ' + V.verdictHtml('no answer', m.empty + ' no answer'); }
+  // right / asked by level, only the levels that were asked: "medium 18/24 · hard 9/20" ('' for a run from before levels)
+  var LEVEL_ORDER = ['easy', 'medium', 'hard'];
+  V.levelsText = function (m) {
+    var by = (m && m.by_level) || {};
+    return LEVEL_ORDER.filter(function (l) { return by[l] && by[l][1]; }).map(function (l) { return l + ' ' + by[l][0] + '/' + by[l][1]; }).join(' · ');
+  };
+  V.hardText = function (m) { var h = m && m.by_level && m.by_level.hard; return h && h[1] ? 'hard ' + h[0] + '/' + h[1] : ''; };
+  // the fields of an extract run: all-or-nothing hides them, so they are counted apart ('' for the other tests)
+  function fieldsText(m) { return C.num(m.fields_asked) ? m.fields_right + ' of ' + m.fields_asked + ' fields right' : ''; }
   // One plain line under the verdict: the score of each engine, or why the run is not graded ('' for a run from before grading)
   V.gradeText = function (final) {
     var rts = Object.keys(final || {}).filter(function (rt) { return graded(final[rt]); }), a = final.sllm, b = final.llama;
@@ -90,7 +99,8 @@
   function reading(slot, rt, o) {
     var m = (o.final || {})[rt], now = (o.live || {})[rt];
     if (slot.score) {
-      return graded(m) ? { text: m.correct + ' of ' + asked(m), unit: Math.round(100 * m.correct / Math.max(1, asked(m))) + '%', raw: null, live: scoreDetail(m) } :
+      return graded(m) ? { text: m.correct + ' of ' + asked(m), unit: Math.round(100 * m.correct / Math.max(1, asked(m))) + '%', raw: null, live: scoreDetail(m),
+        more: [V.levelsText(m), fieldsText(m)].filter(Boolean) } :
         { text: '–', unit: '', raw: null, live: '' };
     }
     if (slot.verdict) {
@@ -105,7 +115,8 @@
   }
   function rowHtml(slot, rt, r, who) {
     return '<div class="t-row ' + (who ? rt : 'solo') + (r.text === '–' ? ' blank' : '') + '">' + (who ? '<i class="swatch ' + rt + '"></i><span class="sr">' + esc(C.SERIES[rt].label) + ': </span>' : '') +
-      '<span class="t-num">' + esc(r.text) + '</span>' + (r.unit ? '<span class="t-unit">' + esc(r.unit) + '</span>' : '') + (r.live ? '<span class="t-live">' + r.live + '</span>' : '') + '</div>';
+      '<span class="t-num">' + esc(r.text) + '</span>' + (r.unit ? '<span class="t-unit">' + esc(r.unit) + '</span>' : '') + (r.live ? '<span class="t-live">' + r.live + '</span>' : '') +
+      (r.more && r.more.length ? '<div class="t-more small muted">' + r.more.map(esc).join('<br>') + '</div>' : '') + '</div>';
   }
   // The headline tiles. o: {scenario, rts, final: {rt: numbers}, live: {rt: {tok_s, read_tok_s, running, start}}, now (ms)}.
   V.tilesHtml = function (o) {
@@ -153,6 +164,16 @@
     return '<table class="numtable"><thead><tr><th scope="col">Measure</th>' + rts.map(function (rt) { return '<th scope="col">' + C.SERIES[rt].label + '</th>'; }).join('') +
       (two ? '<th scope="col">Sonic LLM vs llama.cpp</th>' : '') + '</tr></thead><tbody>' + rows.join('') + '</tbody></table>';
   };
+  // The score by skill, one table row per skill, for a graded run ('' when it has none): the part of "All numbers" that says what a model is good at.
+  V.skillsTable = function (per, rts) {
+    var have = rts.filter(function (rt) { return per[rt] && per[rt].by_skill && Object.keys(per[rt].by_skill).length; });
+    if (!have.length) return '';
+    var skills = Object.keys(per[have[0]].by_skill).sort();
+    return '<table class="numtable skills"><caption>Right by skill</caption><thead><tr><th scope="col">Skill</th>' + have.map(function (rt) { return '<th scope="col">' + C.SERIES[rt].label + '</th>'; }).join('') +
+      '</tr></thead><tbody>' + skills.map(function (k) {
+        return '<tr><th scope="row">' + esc(k) + '</th>' + have.map(function (rt) { var v = per[rt].by_skill[k] || [0, 0]; return '<td class="' + rt + '">' + v[0] + ' of ' + v[1] + '</td>'; }).join('') + '</tr>';
+      }).join('') + '</tbody></table>';
+  };
   // Two short pills for the history list: the headline of a saved run.
   V.headlines = function (rec) {
     var rts = Object.keys(rec.metrics || {}).filter(function (rt) { return Object.keys(rec.metrics[rt]).length; });
@@ -161,7 +182,7 @@
       var slot = SLOTS[id], vals = rts.map(function (rt) { return slotValue(slot, rec.metrics[rt]); });
       if (rts.length > 1 && rts[0] === 'sllm') { var c = V.compare(vals[0], vals[1], slot.lower); if (c) return slot.label + ' ' + c.text; }
       return vals[0] !== null && vals[0] !== undefined ? slot.label + ' ' + V.valueText(vals[0], slot.unit) : '';
-    }).concat(rts.some(function (rt) { return graded(rec.metrics[rt]); }) ? [score] : []).filter(Boolean);
+    }).concat(rts.some(function (rt) { return graded(rec.metrics[rt]); }) ? [score, V.hardText(rec.metrics[rts[0]])] : []).filter(Boolean);
   };
 
   // -- notes under an answer ------------------------------------------------------------------------------------------

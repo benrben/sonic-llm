@@ -92,3 +92,102 @@ def test_extraction_compares_every_field_and_a_reply_that_is_not_json_fails_them
     assert grade_fields('{"chair": "Rosa Thorne"', FIELDS)[0] == WRONG  # cut off
     assert grade_fields("", FIELDS)[0] == EMPTY
     assert grade_fields('{"chair": null, "meeting_date": ["14 January 2027"]}', FIELDS)[1] == {"chair": False, "meeting_date": True, "approved_budget_eur": False}
+
+
+# -- questions of the sample key: types, tolerance, NOT STATED and the reasons ------------------------------------------------------
+def money(n, **more):
+    return {"accept": [f"{n:,} euros", f"{n:,}"], "type": "number", "skill": "arithmetic", **more}
+
+
+@pytest.mark.parametrize("reply", ["3400", "3,400", "€3,400", "EUR 3400.00", "3,400.00 euros", "**3,400 euros**", "3400 €"])
+def test_a_number_is_right_with_or_without_separators_currency_and_zero_decimals(reply):
+    assert grading.grade_question(reply, money(3400)) == (CORRECT, "")
+
+
+@pytest.mark.parametrize("reply, reason", [("34000", "wrong arithmetic"), ("3,401 euros", "wrong arithmetic"), ("3,400 or 3,500 euros", "gave two answers"),
+                                           ("I could not say", "wrong answer"), ("", "no answer"), ("<think>3400</think>", "no answer")])
+def test_a_wrong_number_says_why(reply, reason):
+    verdict, why = grading.grade_question(reply, money(3400))
+    assert (verdict, why) == (EMPTY if reason == "no answer" else WRONG, reason)
+
+
+def test_the_trap_a_wrong_answer_fell_into_is_the_reason():
+    old = money(3400, reject=["2,975 euros", "2975"], trap="old")
+    assert grading.grade_question("2,975 euros", old) == (WRONG, "gave the old value")
+    usd = {"accept": ["5,500 dollars", "5,500"], "type": "number", "skill": "lookup", "reject": ["5,000"], "trap": "currency"}
+    assert grading.grade_question("5000 euros", usd) == (WRONG, "gave the amount in the other currency")
+    twin = {"accept": ["Ilse Brandt"], "reject": ["Tomas Brandt"], "trap": "similar", "skill": "lookup"}
+    assert grading.grade_question("Tomas Brandt", twin) == (WRONG, "gave the look-alike")
+    assert grading.grade_question("Ilse Brandt", twin) == (CORRECT, "")
+    assert grading.grade_question("Nils Olsen", twin) == (WRONG, "wrong answer")
+
+
+PERCENT = {"accept": ["37.5"], "type": "percent", "tol": 0.5, "skill": "arithmetic"}
+
+
+@pytest.mark.parametrize("reply, verdict", [("37.5", CORRECT), ("37.5%", CORRECT), ("about 37.9 %", CORRECT), ("37", CORRECT), ("38", CORRECT), ("37.0", CORRECT),
+                                            ("38.1", WRONG), ("36.9", WRONG), ("37 or 40", WRONG), ("", EMPTY)])
+def test_a_percentage_is_right_within_half_a_point_of_the_key(reply, verdict):
+    assert grading.grade_question(reply, PERCENT)[0] == verdict
+
+
+def test_the_tolerance_is_only_for_percentages():
+    assert grading.grade_question("3401", money(3400))[0] == WRONG
+    assert grading.grade_question("17 days", {"accept": ["18 days", "18"], "type": "days", "skill": "date-math"})[0] == WRONG
+
+
+WEEKDAY = {"accept": ["Tuesday", "Tue"], "type": "weekday", "skill": "date-math"}
+
+
+def test_a_weekday_is_the_name_or_its_short_form_and_another_day_is_wrong_date_math():
+    assert [grading.grade_question(r, WEEKDAY)[0] for r in ("Tuesday", "tuesday.", "It is a Tue", "**Tuesday**")] == [CORRECT] * 4
+    assert grading.grade_question("Wednesday", WEEKDAY) == (WRONG, "wrong date math")
+    assert grading.grade_question("Tuesday or Wednesday", WEEKDAY) == (WRONG, "gave two answers")
+
+
+DAYS = {"accept": ["17 days", "17", "seventeen"], "type": "days", "skill": "date-math"}
+
+
+@pytest.mark.parametrize("reply", ["17", "17 days", "seventeen days", "Seventeen", "2 weeks and 3 days", "2 weeks, 3 days", "two weeks and three days",
+                                   "17 days (2 weeks and 3 days)"])
+def test_a_duration_is_the_same_in_days_weeks_and_words(reply):
+    assert grading.grade_question(reply, DAYS)[0] == CORRECT
+
+
+@pytest.mark.parametrize("reply", ["18 days", "2 weeks", "2 weeks and 4 days", "three weeks", "17 or 18 days", "twenty-one days"])
+def test_another_duration_is_wrong(reply):
+    assert grading.grade_question(reply, DAYS)[0] == WRONG
+
+
+def test_durations_are_only_converted_for_questions_that_ask_for_one():
+    assert grading.grade_question("2 weeks and 3 days", {"accept": ["17"], "type": "number", "skill": "arithmetic"})[0] == WRONG
+    assert grading._spell_durations("twenty-one days") == "21 days" and grading._spell_durations("one week") == "7 days"
+
+
+NOT_STATED = {"accept": ["NOT STATED"], "type": "nostated", "skill": "negative"}
+
+
+@pytest.mark.parametrize("reply", ["NOT STATED", "not stated", "Not stated.", "**NOT STATED**", "NOT STATED: the document does not say who runs it",
+                                   "<think>maybe 40</think>NOT STATED"])
+def test_not_stated_passes_when_the_reply_says_it_and_gives_no_value(reply):
+    assert grading.grade_question(reply, NOT_STATED) == (CORRECT, "")
+
+
+@pytest.mark.parametrize("reply, reason", [("Ilse Brandt", "invented an answer"), ("040 555 1234", "invented an answer"), ("NOT STATED, but probably 12 days", "invented an answer"),
+                                           ("NOT STATED " + "word " * 20, "invented an answer"), ("The document does not mention it.", "did not say NOT STATED"),
+                                           ("I don't know", "did not say NOT STATED"), ("", "no answer")])
+def test_not_stated_fails_when_a_value_is_invented_or_the_phrase_is_missing(reply, reason):
+    verdict, why = grading.grade_question(reply, NOT_STATED)
+    assert (verdict, why) == (EMPTY if not reply else WRONG, reason)
+
+
+def test_a_value_does_not_pass_a_question_that_has_one_just_because_it_says_not_stated():
+    assert grading.grade_question("NOT STATED", money(3400)) == (WRONG, "wrong answer")
+
+
+def test_hedging_still_fails_in_every_type():
+    date = {"accept": ["14 March 2027", "2027-03-14"], "type": "date", "skill": "update", "reject": ["2 May 2027"], "trap": "old"}
+    assert grading.grade_question("14 March 2027", date)[0] == CORRECT
+    assert grading.grade_question("14 March 2027, or maybe 2 May 2027", date) == (WRONG, "gave two answers")
+    assert grading.grade_question("2 May 2027", date) == (WRONG, "gave the old value")
+    assert grading.grade_question("It could be 40 or 41 percent", PERCENT)[0] == WRONG

@@ -67,11 +67,26 @@ class Ctx:
         lo = 1 if after else 0
         return self._fresh(lambda: base + datetime.timedelta(days=self.r.randint(lo, within)))
 
+    def date_between(self, after: datetime.date, lo: int, hi: int) -> datetime.date:
+        """A date `lo` to `hi` days after `after`, new for this document."""
+        return self._fresh(lambda: after + datetime.timedelta(days=self.r.randint(lo, hi)))
+
+    def person_like(self, other: str) -> str:
+        """A new person with the surname of `other` (two people who could be mixed up)."""
+        return self._fresh(lambda: f"{self.r.choice(FIRST)} {other.split()[-1]}")
+
     def before(self, d: datetime.date, lo: int = 14, hi: int = 60) -> datetime.date:
         return self._fresh(lambda: d - datetime.timedelta(days=self.r.randint(lo, hi)))
 
     def when(self, d: datetime.date) -> str:
         return f"{d.day} {MONTHS[d.month - 1]} {d.year}" if self.style == "dmy" else f"{MONTHS[d.month - 1]} {d.day}, {d.year}"
+
+
+WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+
+def weekday_forms(d: datetime.date) -> list[str]:
+    return [WEEKDAYS[d.weekday()], WEEKDAYS[d.weekday()][:3]]
 
 
 def date_forms(d: datetime.date) -> list[str]:

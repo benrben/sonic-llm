@@ -114,7 +114,8 @@
     var checks = ev.checks ? ' (' + Object.keys(ev.checks).map(function (k) { return k + ' ' + (ev.checks[k] ? 'right' : 'wrong'); }).join(', ') + ')' : '';
     var rows = [['Document', ev.document.split('/').pop()], ['Question', ev.question], ['Expected', ev.expected]];
     row.querySelector('.facts').innerHTML = rows.map(function (r) { return '<dt>' + r[0] + '</dt><dd>' + esc(r[1]) + '</dd>'; }).join('') +
-      '<dt>Verdict</dt><dd>' + V.verdictHtml(ev.verdict) + esc(checks) + '</dd>';
+      '<dt>Verdict</dt><dd>' + V.verdictHtml(ev.verdict) + esc(checks) + '</dd>' + (ev.reason ? '<dt>Why</dt><dd>' + esc(ev.reason) + '</dd>' : '') +
+      (ev.level ? '<dt>Level</dt><dd>' + esc(ev.level + ' · ' + ev.skill) + '</dd>' : '');
     row.querySelector('.facts').hidden = row.querySelector('.alabel').hidden = false;
   }
   // what an agent's job came to: the run's verdict, the questions it answered, or a reply cut at the limit
@@ -192,7 +193,7 @@
     Object.keys(rec.metrics || {}).forEach(function (rt) { S.final[rt] = rec.metrics[rt]; });
     S.stage = S.stage || { scenario: rec.scenario, rts: rts };
     App.showMemNote(rec.metrics);
-    $('last').innerHTML = V.numbersTable(rec.metrics, rts) + '<p class="small muted note">' + esc(rec.note) + '</p>';
+    $('last').innerHTML = V.numbersTable(rec.metrics, rts) + V.skillsTable(rec.metrics, rts) + '<p class="small muted note">' + esc(rec.note) + '</p>';
     renderTiles();
   }
 

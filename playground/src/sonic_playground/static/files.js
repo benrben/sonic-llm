@@ -7,7 +7,8 @@
 
   App.loadFiles = function () {
     return App.api('GET', '/files').then(function (d) {
-      S.files = d.files;
+      S.files = d.files; S.cases = d.cases || [];
+      $('pickCase').innerHTML = '<option value="">Pick a case…</option>' + S.cases.map(function (c) { return '<option value="' + C.esc(c.id) + '">' + C.esc(c.name) + ' · ' + many(c.documents.length, 'document') + '</option>'; }).join('');
       var have = d.files.map(function (f) { return f.path; });
       var real = function (p) { return have.indexOf(p) >= 0; };
       S.picks.chat = S.picks.chat.filter(real); S.picks.jobs = S.picks.jobs.filter(real);
@@ -45,6 +46,15 @@
     var b = e.target.closest && e.target.closest('[data-first]'); if (!b) return;
     var n = +b.dataset.first || S.files.length;
     S.picked = S.files.slice(0, n).map(function (f) { return f.path; }); App.renderAttached();
+  };
+  // shortcuts by length: every document of one size (samples that are short, medium or long), or the documents of one case
+  $('pickSize').onclick = function (e) {
+    var b = e.target.closest && e.target.closest('[data-size]'); if (!b) return;
+    S.picked = S.files.filter(function (f) { return f.size === b.dataset.size; }).map(function (f) { return f.path; }); $('pickCase').value = ''; App.renderAttached();
+  };
+  $('pickCase').onchange = function () {
+    var c = S.cases.filter(function (x) { return x.id === $('pickCase').value; })[0];
+    if (c) { S.picked = c.documents.slice(); App.renderAttached(); }
   };
   $('filesNone').onclick = function () { S.picked = []; App.renderAttached(); };
   $('filesSearch').oninput = renderFiles;

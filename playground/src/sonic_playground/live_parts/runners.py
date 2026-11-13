@@ -35,7 +35,7 @@ async def _run_chat(s: Session, req: RunReq, run_id: str, rt: str) -> dict:
 async def _run_swarm(s: Session, req: RunReq, run_id: str, rt: str, w0: float) -> dict:
     """Agent swarm: one agent per document, then the chat merges their notes."""
     docs = _docs(req.files, req.agents, req.doc_chars)
-    items = graded.plan("swarm", req.message, [f for f, _ in docs])
+    items = graded.plan("swarm", req.message, [f for f, _ in docs], difficulty=req.difficulty)
     q = req.message or _suggest("swarm")
     system = SYSTEM_AGENT
     if items:  # graded: every agent gets one keyed question about its own document and answers with the fact
@@ -45,7 +45,7 @@ async def _run_swarm(s: Session, req: RunReq, run_id: str, rt: str, w0: float) -
     rs = await _agents(s, rt, run_id, [(f, s.one_shot(system, f"<document {f}>\n{t}\n</document>\n\nQuestion: {a}"))
                                        for (f, t), a in zip(docs, asks)], extra=grader and grader.extra)  # fmt: skip
     swarm_wall = time.monotonic() - w0
-    s.readers = {"kind": "swarm", "prefix": "Question: ", "system": system, "docs": docs}
+    s.readers = {"kind": "swarm", "prefix": "Question: ", "system": system, "docs": docs, "difficulty": req.difficulty}
     notes = "\n\n".join(f"Notes on {r['label']}:\n{_clean(r['text'], s)}" for r in rs)
     fin = await _chat_answer(s, rt, run_id, SYSTEM_CHAT,
                              f"{len(rs)} agents read one document each and wrote these notes.\n\n<document notes>\n{notes}\n</document>\n\n"
@@ -63,7 +63,7 @@ async def _run_shared(s: Session, req: RunReq, run_id: str, rt: str, w0: float) 
     """Many questions, one document: the shared prefix is read once."""
     f = req.files[0] if req.files else max(list_files(), key=lambda x: x["bytes"])["path"]
     doc = read_file(f, req.doc_chars)
-    items = graded.plan("shared", "", [f], agents=req.agents)
+    items = graded.plan("shared", "", [f], agents=req.agents, difficulty=req.difficulty)
     qs = [it.question for it in items] if items else [SHARED_QUESTIONS[i % len(SHARED_QUESTIONS)] for i in range(req.agents)]
     grader = graded.Grader(items, lambda t: _clean(t, s)) if items else None
     rs = await _agents(s, rt, run_id, [(qq, s.one_shot(graded.SYSTEM_FACT if items else SYSTEM_AGENT, f"<document {f}>\n{doc}\n</document>\n\nQuestion: {qq}"))
@@ -79,10 +79,11 @@ async def _run_doc_task(s: Session, req: RunReq, run_id: str, rt: str, w0: float
     """Classify / extract / compress / summarize: one agent per document does the job, the run checks the replies."""
     task = DOC_TASKS[req.scenario]
     docs = _docs(req.files, req.agents, req.doc_chars)
-    items = graded.plan(req.scenario, req.message, [f for f, _ in docs])
-    msg = ", ".join(graded.labels()) if items and req.scenario == "classify" else req.message or _suggest(req.scenario)
+    items = graded.plan(req.scenario, req.message, [f for f, _ in docs], difficulty=req.difficulty)
+    # graded classify: every document is asked with its own labels (the kinds, or on hard the ratings of its kind)
+    msg = ", ".join(dict.fromkeys(x for it in items for x in it.labels)) if items and req.scenario == "classify" else req.message or _suggest(req.scenario)
     grader = graded.Grader(items, lambda t: _clean(t, s)) if items else None
-    asks = [task["ask"].format(m=it.question.removeprefix("Give these fields: ") if req.scenario == "extract" else msg) for it in items] \
+    asks = [task["ask"].format(m=", ".join(it.labels) if it.kind == "label" else it.question.removeprefix("Give these fields: ")) for it in items] \
         if items else [task["ask"].format(m=msg)] * len(docs)  # fmt: skip
 
     def verdict(r):
@@ -230,7 +231,7 @@ def _relay_check(s: Session, wave: list[int], rs: list[dict], done: dict[int, li
 async def _run_followup(s: Session, req: RunReq, run_id: str, rt: str, w0: float) -> dict:
     """Ask the readers again: the last swarm / team's agents answer from their documents still in memory."""
     rd, q = s.readers, req.message or _suggest("followup")
-    items = graded.plan("followup", req.message, [f for f, _ in rd["docs"]], shift=1)  # the next keyed question of each agent
+    items = graded.plan("followup", req.message, [f for f, _ in rd["docs"]], shift=1, difficulty=rd["difficulty"])  # a harder question
     grader = graded.Grader(items, lambda t: _clean(t, s)) if items else None
     asks = [it.question for it in items] if items else [q] * len(rd["docs"])
     # the same prompt up to the question: the engine finds each document's cells and reads only the question
@@ -264,39 +265,66 @@ def _team_found(s: Session, rs: list[dict], qs: list[str], one_each: bool = Fals
 async def _team_agents(s: Session, rt: str, run_id: str, docs: list[tuple[str, str]], qs: list[str],
                        grader: graded.Grader | None = None) -> list[dict]:
     """One agent per document answers every question from it or says NOT FOUND; its row tells how many it found. A graded
-    team (`grader`): agent i gets only the keyed question qs[i], as its Q1."""
-    asks = [f"Q1: {q}" for q in qs] if grader else [f"Q{i}: {q}" for i, q in enumerate(qs, 1)]
-    numbered = "\n".join(asks)
-    n_out, of = None, 1 if grader else len(qs)  # agents answer until they stop (or an optional limit)
-    return await _agents(s, rt, run_id, [(f, s.one_shot(SYSTEM_TEAM, f"<document {f}>\n{t}\n</document>\n\nQuestions:\n{asks[i] if grader else numbered}"))
-                                         for i, (f, t) in enumerate(docs)], n_out=n_out,
+    team (`grader`): agent i gets only the keyed question qs[i], as its Q1, and, for a whole case, the case's questions after it."""
+    case = [it.question for it in grader.case] if grader else []
+    own = [f"Q1: {q}" + "".join(f"\nQ{n}: {c}" for n, c in enumerate(case, 2)) for q in qs] if grader else []
+    numbered = "\n".join(f"Q{i}: {q}" for i, q in enumerate(qs, 1))
+    of = 1 + len(case) if grader else len(qs)  # agents answer until they stop (or an optional limit)
+    system = graded.SYSTEM_TEAM_FACT if grader else SYSTEM_TEAM
+    return await _agents(s, rt, run_id, [(f, s.one_shot(system, f"<document {f}>\n{t}\n</document>\n\nQuestions:\n{own[i] if grader else numbered}"))
+                                         for i, (f, t) in enumerate(docs)],
                          extra=lambda r: {"found": len(parse_report(_clean(r["text"], s), of)), "of": of, **(grader.extra(r) if grader else {})})  # fmt: skip
 
 
-async def _team_manager(s: Session, rt: str, run_id: str, qs: list[str], found: dict[int, list[tuple[str, str]]], n_docs: int) -> dict:
-    """The manager merges the agents' findings into the final answer to each question (shown with what the agents found)."""
+async def _team_manager(s: Session, rt: str, run_id: str, qs: list[str], found: dict[int, list[tuple[str, str]]], n_docs: int, case: bool = False) -> dict:
+    """The manager merges the agents' findings into the final answer to each question (shown with what the agents found). For a
+    whole case the questions are the case's and the manager writes one `Q<n>: value` line for each, which is graded."""
     live.BUS.publish({"type": "token", "run": run_id, "rt": rt, "text": "Agents found: " + " · ".join(
         f"Q{i} in {len(found[i])}/{n_docs} docs" for i in found) + "\n\nManager:\n"})  # fmt: skip
     live.BUS.publish({"type": "phase", "run": run_id, "rt": rt, "msg": f"{SERIES[rt]}: manager writing"})
     reports = "\n\n".join(f"Q{i}: {qs[i - 1]}\n" + ("\n".join(f"- [{d}] {a}" for d, a in found[i]) or "- no agent found it")
                            for i in found)  # fmt: skip
-    return await _chat_answer(s, rt, run_id, SYSTEM_MANAGER, f"Questions and the agents' findings:\n\n<document findings>\n{reports}\n</document>\n\n"
-                                                             f"Write the final answer to each question.", remember=False)  # fmt: skip
+    return await _chat_answer(s, rt, run_id, graded.SYSTEM_MANAGER_FACT if case else SYSTEM_MANAGER,
+                              f"Questions and the agents' findings:\n\n<document findings>\n{reports}\n</document>\n\n"
+                              f"Write the final answer to each question.", remember=False)  # fmt: skip
+
+
+def _case_found(s: Session, rs: list[dict], n: int) -> dict[int, list[tuple[str, str]]]:
+    """{case question number: [(document name, answer)]}: the agents' answers to Q2.. (Q1 is the agent's own question)."""
+    found = {i: [] for i in range(1, n + 1)}
+    for r in rs:
+        for qi, a in parse_report(_clean(r["text"], s), n + 1).items():
+            if qi > 1:
+                found[qi - 1].append((r["label"].split("/")[-1], a))
+    return found
+
+
+def _case_lines(rows: list[dict]) -> str:
+    """The case questions with their verdicts, for the answer area."""
+    return "\n\nCase questions:\n" + "\n".join(f"- {r['question']} {r['verdict']}" + (f" ({r['reason']})" if r["reason"] else "") for r in rows)
 
 
 async def _run_team(s: Session, req: RunReq, run_id: str, rt: str, w0: float) -> dict:
-    """Research team: one agent per document answers every question or says NOT FOUND; a manager merges the reports."""
+    """Research team: one agent per document answers every question or says NOT FOUND; a manager merges the reports. When the
+    picked documents are one whole case, the manager also answers the case's questions, which need facts of several documents."""
     docs = _docs(req.files, req.agents, req.doc_chars)
-    items = graded.plan("team", req.message, [f for f, _ in docs])
+    names = [f for f, _ in docs]
+    items = graded.plan("team", req.message, names, difficulty=req.difficulty)
     qs = [it.question for it in items] if items else questions_of(req.message or _suggest("team"))
     if not qs:
         raise HTTPException(422, "write at least one question")
-    grader = graded.Grader(items, lambda t: _clean(t, s)) if items else None
+    case = graded.plan_case(names) if items else None
+    grader = graded.Grader(items, lambda t: graded.team_line(_clean(t, s), 1), case) if items else None
     rs = await _team_agents(s, rt, run_id, docs, qs, grader)
     team_wall = time.monotonic() - w0
-    s.readers = {"kind": "team", "prefix": "Questions:\nQ1: ", "system": SYSTEM_TEAM, "docs": docs}
+    s.readers = {"kind": "team", "prefix": "Questions:\nQ1: ", "system": graded.SYSTEM_TEAM_FACT if items else SYSTEM_TEAM, "docs": docs,
+                 "difficulty": req.difficulty}
     found = _team_found(s, rs, qs, one_each=bool(items))
-    mgr = await _team_manager(s, rt, run_id, qs, found, len(rs))
+    if case:
+        mgr = await _team_manager(s, rt, run_id, [it.question for it in case], _case_found(s, rs, len(case)), len(rs), case=True)
+        live.BUS.publish({"type": "token", "run": run_id, "rt": rt, "text": _case_lines(grader.grade_case(_clean(mgr["text"], s)))})
+    else:
+        mgr = await _team_manager(s, rt, run_id, qs, found, len(rs))
     n_found = sum(len(v) for v in found.values())
     return {**_summ(rs), "agents": len(rs), "agents_asked": req.agents, "agents_note": "one per document",
             "questions": len(qs), "swarm_wall_s": round(team_wall, 2),
@@ -311,8 +339,13 @@ async def _run_team(s: Session, req: RunReq, run_id: str, rt: str, w0: float) ->
 
 
 async def _run_long(s: Session, req: RunReq, run_id: str, rt: str) -> dict:
-    """Long document: the files joined into one prompt up to the context, asked twice (prefill, then the cached ask)."""
+    """Long document: the files joined into one prompt up to the context, asked twice (prefill, then the cached ask). On keyed
+    samples it is graded: after the two asks of the first question, the other keyed questions about one document are asked,
+    each reading only its question."""
+    items = graded.plan("long", req.message, req.files, difficulty=req.difficulty) if req.files else None
     files = req.files or [f["path"] for f in list_files()]
+    if items:  # the document the questions are about comes first, so that it is never the one cut to fit
+        files = [items[0].doc] + [f for f in files if f != items[0].doc]
     parts, total = [], 0
     e = s.engines[rt]
     # reading a GGUF's header takes over a second, and the server would stand still for it: no Stop, no events
@@ -323,18 +356,36 @@ async def _run_long(s: Session, req: RunReq, run_id: str, rt: str) -> dict:
             break
         parts.append(f"<file {f}>\n{t}\n</file>")
         total += len(t)
-    q = req.message or _suggest("long")
-    prompt = s.one_shot(SYSTEM_CHAT, "\n\n".join(parts) + f"\n\nQuestion: {q}")
+    q = items[0].question if items else req.message or _suggest("long")
+    system = graded.SYSTEM_FACT if items else SYSTEM_CHAT
+    prompt = s.one_shot(system, "\n\n".join(parts) + f"\n\nQuestion: {q}")
     ids = await e.tokenize(prompt)
     if len(ids) + 264 > tc:  # past the trained context llama-server refuses the prompt
         ids = ids[: tc - 264]
     first = await e.generate(ids, 200, lane="interactive",
                              on_token=lambda t: live.BUS.publish({"type": "token", "run": run_id, "rt": rt, "text": t}))  # fmt: skip
     again = await e.generate(ids, 200, lane="interactive")  # same length as the first ask, to compare the two
-    return {"prompt_tokens": len(ids), "files": len(parts), "ttft_ms": first.get("ttft_ms"),
-            "prefill_tok_s": round(len(ids) / (first["ttft_ms"] / 1000), 1) if first.get("ttft_ms") else None,
-            "decode_tok_s": first.get("decode_tok_s"), "cached_ttft_ms": again.get("ttft_ms"),
-            "cached_tokens": again.get("cached_tokens"), "same_answer_twice": first["ids"] == again["ids"]}  # fmt: skip
+    out = {"prompt_tokens": len(ids), "files": len(parts), "ttft_ms": first.get("ttft_ms"),
+           "prefill_tok_s": round(len(ids) / (first["ttft_ms"] / 1000), 1) if first.get("ttft_ms") else None,
+           "decode_tok_s": first.get("decode_tok_s"), "cached_ttft_ms": again.get("ttft_ms"),
+           "cached_tokens": again.get("cached_tokens"), "same_answer_twice": first["ids"] == again["ids"]}  # fmt: skip
+    return {**out, **(await _long_questions(s, e, run_id, rt, items, first, system, "\n\n".join(parts)) if items else {})}
+
+
+async def _long_questions(s: Session, e, run_id: str, rt: str, items: list[graded.Item], first: dict, system: str, docs_text: str) -> dict:
+    """Grade the first answer, ask the other questions of a graded long document (the document is in memory: only the question is
+    read), and write each question with its verdict under the answer."""
+    grader = graded.Grader(items, lambda t: _clean(t, s))
+    replies = [first]
+    for it in items[1:]:
+        ids = await e.tokenize(s.one_shot(system, docs_text + f"\n\nQuestion: {it.question}"))
+        replies.append(await e.generate(ids, 200, lane="interactive"))
+    lines = []
+    for i, r in enumerate(replies):
+        x = grader.extra({"i": i, "text": r["text"]})
+        lines.append(f"- {x['question']} {x['verdict']}" + (f" ({x['reason']})" if x["reason"] else ""))
+    live.BUS.publish({"type": "token", "run": run_id, "rt": rt, "text": "\n\nQuestions about the document:\n" + "\n".join(lines)})
+    return grader.metrics()
 
 
 # the scenarios by id (the document jobs, DOC_TASKS, all run as _run_doc_task): those that take the run's start time w0

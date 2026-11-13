@@ -28,7 +28,7 @@ SYSTEM_TEAM = ("You are a research agent on a team. Read the document and answer
 SYSTEM_MANAGER = ("You are the manager of a research team. Agents each read one document and reported what it says. Answer each "
                   "question in turn using only their reports; put the document names you used in [brackets]. If no agent "
                   "found an answer, say so.")
-_QLINE = re.compile(r"^\W*Q\s*(\d+)\s*[:.)\-]\s*(.+)$", re.I)
+QLINE = re.compile(r"^\W*Q\s*(\d+)\s*[:.)\-]\s*(.+)$", re.I)
 
 
 def questions_of(message: str) -> list[str]:
@@ -40,11 +40,11 @@ def questions_of(message: str) -> list[str]:
 
 
 def parse_report(text: str, n: int) -> dict[int, str]:
-    """{question number: answer} from one agent's report; NOT FOUND answers and lines outside 1..n are left out."""
+    """{question number: answer} from one agent's report; NOT FOUND and NOT STATED answers and lines outside 1..n are left out."""
     out = {}
     for ln in text.splitlines():
-        m = _QLINE.match(ln.strip())
-        if m and 1 <= int(m.group(1)) <= n and "not found" not in m.group(2).lower():
+        m = QLINE.match(ln.strip())
+        if m and 1 <= int(m.group(1)) <= n and not re.search(r"not (?:found|stated)", m.group(2).lower()):
             out.setdefault(int(m.group(1)), m.group(2).strip(" *_:"))
     return out
 
@@ -182,6 +182,9 @@ class RunReq(BaseModel):
     thinking: Literal["off", "low", "medium", "high", "max"] = Field(
         "off", description="the model's thinking, through its own chat template: Qwen3 / Gemma 4 know on and off, gpt-oss "
         "low / medium / high; max = the highest level the model knows, answers uncapped. Used as it is with level off or no level.")
+    difficulty: Literal["medium", "hard", "mixed"] = Field(
+        "mixed", description="graded tests on the sample documents: which questions the agents get (mixed: medium and hard in turns); "
+        "classify on hard asks for the fine-grained rating inside the kind")
     level: Literal["off", "sonic", "fast", "normal", "deep"] | None = Field(
         None, description="answer level (levels.py), chat answer only, thinking off in all: off = as it is; sonic = one short line; "
         "fast = a regular chat answer (system prompt \"You are a helpful assistant.\", up to 4096 tokens); normal = two short "

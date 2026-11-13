@@ -6,7 +6,13 @@ of writing a date ("14 March 2027", "March 14th, 2027", "2027-03-14") do not mat
 contains the right digits or letters does not count.
 
 Verdicts are the strings in VERDICTS. What the rules cannot see: a right fact in a wrong place of the text still passes, and
-a free-text answer (a name) is only checked for the name, so two names given together pass if one is right."""
+a free-text answer (a name) is only checked for the name, so two names given together pass if one is right.
+
+A question of the sample key (grade_question) also has a type that says how to read the answer: a plain value (text, number, date,
+weekday), a duration in days ("17 days", "seventeen days" and "2 weeks and 3 days" are all 17 days), a percentage (within the
+key's tolerance of the key, 0.5, because the question asks for about one decimal) or NOT STATED (the reply says so and gives no
+value). A wrong answer comes with a reason: the trap it fell into (`reject`: the old value, the look-alike, the other currency),
+wrong arithmetic, an invented answer, two answers, or none."""
 
 from __future__ import annotations
 
@@ -28,6 +34,18 @@ _MDY = re.compile(r"\b([a-z]{3,9})\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})\b"
 _THOUSANDS = re.compile(r"(?<=\d),(?=\d{3}(?!\d))")
 _TOKEN = re.compile(r"\d{4}-\d{2}-\d{2}|\d+(?:\.\d+)?|[a-z0-9]+(?:[-'][a-z0-9]+)*")
 _DATE, _NUMBER, _CODE = (re.compile(p) for p in (r"\d{4}-\d{2}-\d{2}", r"\d+(?:\.\d+)?", r"[a-z]{1,5}-\d{2,}"))
+_ZERO_DECIMALS = re.compile(r"(?<=\d)\.0+(?!\d)")
+_ONES = "zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen".split()
+_TENS = {w: 10 * i for i, w in enumerate("_ _ twenty thirty forty fifty sixty seventy eighty ninety".split()) if w != "_"}
+_SPELLED = re.compile(rf"\b((?:{'|'.join(_TENS)})(?:[- ](?:one|two|three|four|five|six|seven|eight|nine))?|{'|'.join(_ONES)})(?=\s+(?:days?|weeks?)\b)")
+_WEEKS = re.compile(r"\b(\d+)\s+weeks?(?:\s*(?:,|and)?\s*(\d+)\s+days?)?")
+_NOT_STATED = ["not", "stated"]
+_DOUBT = re.compile(r"(?:not|n't) (?:mention|give|say|state|provide|specify|know)\w*|no information|unknown|cannot|can't|unclear")
+_DAYS = {"monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"}
+NO_ANSWER, INVENTED, TWO_ANSWERS, WRONG_ARITHMETIC, WRONG_DATE = ("no answer", "invented an answer", "gave two answers", "wrong arithmetic",
+                                                                "wrong date math")
+NOT_SAID = "did not say NOT STATED"
+TRAP_REASON = {"old": "gave the old value", "currency": "gave the amount in the other currency", "similar": "gave the look-alike"}
 _ARTICLES = {"a", "an", "the"}
 _LINKS = {"or", "and", "to", "vs", "versus", "either", "maybe", "perhaps", "not", "than", "instead"}  # between two numbers named side by side
 
@@ -47,7 +65,7 @@ def _iso(y: str, month: str, d: str, whole: re.Match) -> str:
 def normalize(text: str) -> str:
     """Lower case, plain quotes, thousands separators gone, dates as ISO (2027-03-14)."""
     s = unicodedata.normalize("NFKC", text).translate(_QUOTES).lower()
-    s = _THOUSANDS.sub("", s)
+    s = _ZERO_DECIMALS.sub("", _THOUSANDS.sub("", s))
     s = _DMY.sub(lambda m: _iso(m[3], m[2], m[1], m), s)
     return _MDY.sub(lambda m: _iso(m[3], m[1], m[2], m), s)
 
@@ -82,8 +100,10 @@ def _numbers_named(toks: list[str], unit: str | None) -> set[str]:
 
 
 def _hedged(toks: list[str], forms: list[list[str]]) -> bool:
-    """Whether the answer names two different dates, codes or numbers of the kind that is asked for."""
+    """Whether the answer names two different weekdays, dates, codes or numbers of the kind that is asked for."""
     first = forms[0]
+    if first[0] in _DAYS:
+        return len(_DAYS & set(toks)) > 1
     if any(_DATE.fullmatch(t) for t in first):
         return len({t for t in toks if _DATE.fullmatch(t)}) > 1
     if any(_CODE.fullmatch(t) for t in first):
@@ -101,9 +121,60 @@ def grade_answer(reply: str, accept: list[str]) -> str:
     if not toks:
         return EMPTY
     forms = [f for f in map(_form, accept) if f]
-    if not any(_has(toks, f) for f in forms) or _hedged(toks, forms):
-        return WRONG
-    return CORRECT
+    return CORRECT if any(_has(toks, f) for f in forms) and not _hedged(toks, forms) else WRONG
+
+
+def _spell_durations(text: str) -> str:
+    """"seventeen days" -> "17 days"; "2 weeks and 3 days" -> "17 days"; "three weeks" -> "21 days"."""
+    def digits(m: re.Match) -> str:
+        words = re.split(r"[- ]", m[1])
+        return str(sum(_TENS.get(w, 0) or _ONES.index(w) for w in words))
+    text = _SPELLED.sub(digits, normalize(text))
+    return _WEEKS.sub(lambda m: f"{7 * int(m[1]) + int(m[2] or 0)} days", text)
+
+
+def _percent(toks: list[str], q: dict) -> bool:
+    key = float(q["accept"][0])
+    return any(abs(float(t) - key) <= q["tol"] + 1e-9 for t in toks if _NUMBER.fullmatch(t)) and not _hedged(toks, [[q["accept"][0]]])
+
+
+def _not_stated(toks: list[str], q: dict) -> tuple[str, str]:
+    """NOT STATED questions: right when the reply says it and gives no value (no number, date or code, and no long explanation)."""
+    at = next((i for i in range(len(toks) - 1) if toks[i:i + 2] == _NOT_STATED), None)
+    if at is None:
+        return WRONG, NOT_SAID if _DOUBT.search(" ".join(toks)) else INVENTED
+    rest = toks[:at] + toks[at + 2:]
+    gives = any(_NUMBER.fullmatch(t) or _DATE.fullmatch(t) or _CODE.fullmatch(t) for t in rest) or len(rest) > 15
+    return (WRONG, INVENTED) if gives else (CORRECT, "")
+
+
+def _why_wrong(toks: list[str], q: dict, hedged: bool) -> str:
+    if hedged:
+        return TWO_ANSWERS
+    if any(_has(toks, f) for f in map(_form, q.get("reject", [])) if f):
+        return TRAP_REASON.get(q.get("trap"), TRAP_REASON["similar"])
+    if q.get("skill") == "arithmetic" and any(_NUMBER.fullmatch(t) for t in toks):
+        return WRONG_ARITHMETIC
+    return WRONG_DATE if q.get("skill") == "date-math" else "wrong answer"
+
+
+def grade_question(reply: str, q: dict) -> tuple[str, str]:
+    """(verdict, reason) of a reply to a question of the sample key: {accept, type, skill, reject, trap, tol}. The reason is "" when
+    correct, "no answer" for an empty reply, else why it is wrong."""
+    answer = final_answer(reply)
+    kind = q.get("type", "text")
+    toks = tokens(_spell_durations(answer) if kind == "days" else answer)
+    if not toks:
+        return EMPTY, NO_ANSWER
+    if kind == "nostated":
+        return _not_stated(toks, q)
+    if kind == "percent":
+        return (CORRECT, "") if _percent(toks, q) else (WRONG, WRONG_ARITHMETIC)
+    forms = [f for f in map(_form, q["accept"]) if f]
+    hedged = _hedged(toks, forms)
+    if any(_has(toks, f) for f in forms) and not hedged:
+        return CORRECT, ""
+    return WRONG, _why_wrong(toks, q, hedged and any(_has(toks, f) for f in forms))
 
 
 def grade_label(reply: str, labels: list[str], right: str) -> str:

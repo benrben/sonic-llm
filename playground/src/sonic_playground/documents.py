@@ -28,7 +28,8 @@ def _roots() -> dict[str, Path]:
 
 
 def list_files() -> list[dict]:
-    """Every document: {path, bytes, est_tokens (about 4 bytes of text to a token), keyed (it has an answer key)}, samples first."""
+    """Every document: {path, bytes, est_tokens (about 4 bytes of text to a token), keyed (it has an answer key), size (short, medium or
+    long, from the key; "" for your own files)}, samples first."""
     out, keyed = [], answer_key().get("documents") or {}
     for folder, root in _roots().items():
         if not root.is_dir():
@@ -37,7 +38,8 @@ def list_files() -> list[dict]:
             if p.is_file() and p.suffix.lower() in TEXT_EXT and not (folder == "samples" and p.name == KEY_FILE):
                 n = p.stat().st_size
                 out.append({"path": f"{folder}/{p.relative_to(root).as_posix()}", "bytes": n, "est_tokens": n // 4,
-                            "keyed": folder == "samples" and p.name in keyed})
+                            "keyed": folder == "samples" and p.name in keyed,
+                            "size": (keyed.get(p.name) or {}).get("size", "") if folder == "samples" else ""})
     return out
 
 
@@ -58,6 +60,16 @@ def key_of(rel: str) -> dict | None:
     """The answer key of document `rel` ("samples/<file>"), None for a document without one (your own files)."""
     folder, _, name = rel.partition("/")
     return (answer_key().get("documents") or {}).get(name) if folder == "samples" else None
+
+
+def cases() -> list[dict]:
+    """The cases of the samples: {id, name, documents: [path]}, each a set of documents that belong together."""
+    return [{"id": c["id"], "name": c["name"], "documents": [f"samples/{n}" for n in c["documents"]]} for c in answer_key().get("cases") or []]
+
+
+def case_for(docs: list[str]) -> dict | None:
+    """The case whose documents are exactly `docs` (any order), with its questions; None when they are not one whole case."""
+    return next((c for c in answer_key().get("cases") or [] if {f"samples/{n}" for n in c["documents"]} == set(docs)), None)
 
 
 def read_file(rel: str, limit: int | None = None) -> str:

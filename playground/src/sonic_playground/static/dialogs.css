@@ -11,7 +11,8 @@ dialog.wide { width: min(940px, calc(100vw - 24px)); height: min(760px, 88vh); }
 #filesSearch { width: 100%; }
 
 /* documents */
-.pickrow { display: flex; flex-wrap: wrap; gap: 8px; }
+.pickrow { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.casepick { display: flex; align-items: center; gap: 8px; font-size: var(--fs-s); color: var(--ink-2); }
 .fileslist { max-height: 50vh; overflow: auto; border: 1px solid var(--hairline); border-radius: var(--radius-s); }
 .fgroup { position: sticky; top: 0; display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 8px 12px; background: var(--card); border-bottom: 1px solid var(--hairline); font-size: var(--fs-s); }
 .fgroup .fopen { display: flex; align-items: center; gap: 6px; padding: 0; border: 0; background: none; font-weight: 600; text-align: left; cursor: pointer; }

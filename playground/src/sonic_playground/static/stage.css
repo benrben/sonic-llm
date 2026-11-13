@@ -55,6 +55,7 @@
 .t-row.blank .t-num { color: var(--muted); }
 .t-unit { font-size: var(--fs-s); color: var(--muted); }
 .t-live { font-size: var(--fs-s); color: var(--muted); }
+.t-more { flex: 0 0 100%; line-height: 1.4; }
 .t-ratio { margin-top: auto; padding-top: 10px; border-top: 1px solid var(--hairline); font-size: var(--fs-m); font-weight: 700; color: var(--ink); }
 .t-ratio.win { color: var(--blue-ink); }
 .t-ratio.lose { color: var(--orange-ink); }
@@ -174,6 +175,7 @@
 .numtable { width: 100%; border-collapse: collapse; font-size: var(--fs-s); }
 .numtable th, .numtable td { padding: 6px 8px; text-align: right; border-bottom: 1px solid var(--hairline); font-variant-numeric: tabular-nums; }
 .numtable th:first-child, .numtable td:first-child { text-align: left; padding-left: 0; }
+.numtable caption { text-align: left; font-weight: 600; color: var(--ink-2); padding: 14px 0 4px; }
 .numtable thead th { font-weight: 600; color: var(--ink-2); }
 .numtable .sllm { color: var(--blue-ink); font-weight: 600; }
 .numtable .llama { color: var(--orange-ink); font-weight: 600; }

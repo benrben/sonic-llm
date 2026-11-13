@@ -38,7 +38,7 @@
   V.planText = function (id, k) {
     var p = k.perFile ? perFilePlan(id, k) : { t: PLAN[id] ? PLAN[id](k.n, k.a, k) : k.n ? 'Your ' + many(k.n, 'document') + ' go with this message.' : '', warn: false };
     if (k.maxThink && k.perFile) { p.t += ' Thinking max: replies have no length limit.'; p.warn = true; }
-    if (k.grade) p.t += GRADE_PLAN[k.grade];
+    if (k.grade) p.t += GRADE_PLAN[k.grade] + (k.grade === 'yes' && k.difficulty ? ' Difficulty: ' + k.difficulty + '.' : '');
     if (k.room && k.a > k.room) { p.t += ' More than ' + k.room + ' agents do not all fit in memory at once: the rest wait for a free slot or read less of their document.'; p.warn = true; }
     if (k.compare && k.a > 64) { p.t += ' With llama.cpp compared, a run of this many agents takes much longer.'; p.warn = true; }
     if (k.level !== 'off') p.t += V.LEVEL_FREE.indexOf(id) >= 0 ? ' Answer levels do not apply to this test.' : ' Answer level: ' + k.level + '.';
@@ -86,6 +86,13 @@
     if (legacy) return V.THINK.map(function (t, i) { return radio('lvl', i, i === think, t); }).join('');
     return V.LEVELS.map(function (t) { return radio('lvl', t, t === level, t, V.LEVEL_WHAT[t]); }).join('');
   };
+
+  // The difficulty buttons of the graded tests: medium and hard questions, or both in turns (the default).
+  V.DIFFICULTIES = ['medium', 'hard', 'mixed'];
+  V.DIFFICULTY_WHAT = { medium: 'Medium questions: a revised value, a comparison, a sum over a table, or "NOT STATED".',
+    hard: 'Hard questions: two facts from different sections, dates and percentages worked out, corrections. Classify rates inside the kind.',
+    mixed: 'Medium and hard questions in turns.' };
+  V.difficultyHtml = function (cur) { return V.DIFFICULTIES.map(function (d) { return radio('diff', d, d === cur, d, V.DIFFICULTY_WHAT[d]); }).join(''); };
 
   // Same rules as chat_template.split_thinking (chat_template.py): Qwen3 </think>, harmony's switch to the final channel.
   var THOUGHT_END = /<\/think>|(?:<\|end\|>)?(?:<\|start\|>)?assistant(?:<\|channel\|>)?final(?:<\|message\|>)?/;
@@ -156,7 +163,7 @@
     var act = !mine ? '<span></span>' : sure ? '<span class="sure"><button class="btn danger" data-del="' + esc(f.path) + '" type="button">Remove</button><button class="link" data-keep="1" type="button">Keep</button></span>' :
       '<button class="btn icon quiet gone" data-ask="' + esc(f.path) + '" type="button" aria-label="Remove ' + esc(name(f.path)) + '"><svg class="ic s" aria-hidden="true"><use href="#i-trash"/></svg></button>';
     return '<div class="frow"><input type="checkbox" data-p="' + esc(f.path) + '" id="' + id + '"' + (on ? ' checked' : '') + '><label class="p" for="' + id + '">' + esc(name(f.path)) +
-      '</label><span class="n">about ' + C.fmt(f.est_tokens) + ' tokens</span>' + act + '</div>';
+      '</label><span class="n">' + (f.size ? f.size + ' · ' : '') + 'about ' + C.fmt(f.est_tokens) + ' tokens</span>' + act + '</div>';
   }
 
   // The memory chart's note: [short, its tooltip]: the memory set aside for agents and (after a run, per) the most of it used.
