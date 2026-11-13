@@ -1,0 +1,71 @@
+SLLM patch 11 (copy-rows): a copy between per-sequence KV streams moves only the rows the caller says are used.
+libllama's seq_cp across streams copies each layer's whole stream view ([row, kv_size]) at the next llama_decode of its
+context (ggml_backend_tensor_copy -> ggml_metal_buffer_cpy_tensor, a memcpy for shared buffers); at 40k cells that is a 6 GB
+copy on the executor thread. ggml_backend_metal_sllm_set_copy_rows(n) (exported, thread-local, 0 = off, the default) makes
+such a copy stop after n rows. It cuts nothing but a copy of two views of one cache tensor with identical contiguous 2-D rows;
+every other copy moves all of its bytes. ggml_backend_metal_sllm_copy_stats reports how many copies were cut and the bytes saved.
+Host code only: no kernel source changes, so the switch-off path is the official one.
+Against llama.cpp b11669 (source tarball 620d222) with patches 0001-0003 and 0010 applied, applied with patch -p1 in ggml/.
+
+--- a/src/ggml-metal/ggml-metal-device.m
++++ b/src/ggml-metal/ggml-metal-device.m
+@@ -2439,10 +2439,58 @@
+     }
+ }
+ 
++// SLLM partial stream copies. With per-sequence KV streams libllama's seq_cp between streams queues a copy of each layer's
++// whole stream view ([row, kv_size]) and applies it at the start of the next llama_decode of that context, through
++// ggml_backend_tensor_copy: at long context nearly all of it is rows no cell uses. With a hint set
++// (ggml_backend_metal_sllm_set_copy_rows(n), 0 = off) such a copy stops after n rows; the caller guarantees that every row
++// the copied streams use is below n (the rows past it only hold stale data that the cell metadata masks).
++// The hint is thread-local: the thread that calls llama_decode sets it right before and clears it right after, so it cannot
++// reach a copy of another context (applied in that context's own llama_decode) or another thread. It only cuts a copy of two
++// views of one cache tensor (libllama's k_stream / v_stream) with identical, contiguous 2-D rows (a transposed V cache has
++// no rows to cut at: the caller sets the hint only for a flash-attention cache); any other copy moves all of its bytes.
++static _Thread_local int64_t g_sllm_copy_rows = 0;
++
++// copies that were cut and the bytes they did not move (ggml_backend_metal_sllm_copy_stats), for checks
++static _Atomic(int64_t) g_sllm_copy_cuts  = 0;
++static _Atomic(int64_t) g_sllm_copy_saved = 0;
++
++__attribute__((visibility("default"))) void ggml_backend_metal_sllm_set_copy_rows(int64_t n) {
++    g_sllm_copy_rows = n > 0 ? n : 0;
++}
++
++__attribute__((visibility("default"))) void ggml_backend_metal_sllm_copy_stats(int64_t * cuts, int64_t * saved_bytes) {
++    *cuts        = atomic_load_explicit(&g_sllm_copy_cuts,  memory_order_relaxed);
++    *saved_bytes = atomic_load_explicit(&g_sllm_copy_saved, memory_order_relaxed);
++}
++
++static size_t ggml_metal_sllm_copy_bytes(const struct ggml_tensor * src, const struct ggml_tensor * dst) {
++    const size_t size = ggml_nbytes(src);
++    const int64_t rows = g_sllm_copy_rows;
++
++    if (rows <= 0 || src == dst || src->view_src == NULL || src->view_src != dst->view_src) {
++        return size;
++    }
++    if (src->type != dst->type || src->ne[0] != dst->ne[0] || src->ne[1] != dst->ne[1] ||
++        src->ne[2] != 1 || src->ne[3] != 1 || dst->ne[2] != 1 || dst->ne[3] != 1 ||
++        !ggml_is_contiguous(src) || !ggml_is_contiguous(dst)) {
++        return size;
++    }
++    if (rows >= src->ne[1]) {
++        return size;
++    }
++
++    const size_t cut = (size_t) rows*src->nb[1];
++
++    atomic_fetch_add_explicit(&g_sllm_copy_cuts,  1, memory_order_relaxed);
++    atomic_fetch_add_explicit(&g_sllm_copy_saved, (int64_t) (size - cut), memory_order_relaxed);
++
++    return cut;
++}
++
+ bool ggml_metal_buffer_cpy_tensor(ggml_metal_buffer_t buf_dst, const struct ggml_tensor * src, struct ggml_tensor * dst) {
+     ggml_metal_buffer_t buf_src = (ggml_metal_buffer_t)src->buffer->context;
+ 
+-    const size_t size = ggml_nbytes(src);
++    const size_t size = ggml_metal_sllm_copy_bytes(src, dst);
+ 
+     // if both buffers are shared, we can use memcpy directly
+     if (buf_dst->is_shared && buf_src->is_shared) {

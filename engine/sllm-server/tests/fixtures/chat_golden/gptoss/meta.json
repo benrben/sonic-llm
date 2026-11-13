@@ -1,0 +1,10 @@
+{
+ "family": "gptoss",
+ "now_as_utc": 1793377149,
+ "gguf": "gpt-oss-20b-MXFP4.gguf",
+ "llama_server": "b11669-620d2225c",
+ "bos_token": "<|startoftext|>",
+ "eos_token": "<|return|>",
+ "chat_template_sha256": "b2215de6da8ba369957eece8c5aa18f4af94f6c4d311d85e691373a421d80e89",
+ "generations": 4
+}

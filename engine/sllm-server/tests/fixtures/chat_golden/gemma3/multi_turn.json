@@ -1,0 +1,87 @@
+{
+ "family": "gemma3",
+ "gguf": "gemma-3-4b-it-qat-Q4_0.gguf",
+ "conversation": "multi_turn",
+ "messages": [
+  {
+   "role": "system",
+   "content": "You are a terse assistant."
+  },
+  {
+   "role": "user",
+   "content": "Name a colour."
+  },
+  {
+   "role": "assistant",
+   "content": "Blue."
+  },
+  {
+   "role": "user",
+   "content": "Another."
+  },
+  {
+   "role": "assistant",
+   "content": "  Red.  \n"
+  },
+  {
+   "role": "user",
+   "content": "And one more please."
+  }
+ ],
+ "tools": [],
+ "prompt": "<start_of_turn>user\nYou are a terse assistant.\n\nName a colour.<end_of_turn>\n<start_of_turn>model\nBlue.<end_of_turn>\n<start_of_turn>user\nAnother.<end_of_turn>\n<start_of_turn>model\nRed.<end_of_turn>\n<start_of_turn>user\nAnd one more please.<end_of_turn>\n<start_of_turn>model\n",
+ "tokens": [
+  2,
+  105,
+  2364,
+  107,
+  3048,
+  659,
+  496,
+  17514,
+  16326,
+  236761,
+  108,
+  1567,
+  496,
+  10348,
+  236761,
+  106,
+  107,
+  105,
+  4368,
+  107,
+  16520,
+  236761,
+  106,
+  107,
+  105,
+  2364,
+  107,
+  12656,
+  236761,
+  106,
+  107,
+  105,
+  4368,
+  107,
+  9264,
+  236761,
+  106,
+  107,
+  105,
+  2364,
+  107,
+  3133,
+  886,
+  919,
+  5091,
+  236761,
+  106,
+  107,
+  105,
+  4368,
+  107
+ ],
+ "server_prompt_tokens": 51
+}

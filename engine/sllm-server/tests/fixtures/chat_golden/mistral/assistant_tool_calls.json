@@ -1,0 +1,54 @@
+{
+ "family": "mistral",
+ "gguf": "Mistral-7B-Instruct-v0.3-Q4_K_M.gguf",
+ "conversation": "assistant_tool_calls",
+ "messages": [
+  {
+   "role": "user",
+   "content": "Look up café docs."
+  },
+  {
+   "role": "assistant",
+   "content": null,
+   "tool_calls": [
+    {
+     "id": "call_1",
+     "type": "function",
+     "function": {
+      "name": "search_docs",
+      "arguments": "{\"query\": \"caf\\u00e9 \\u65e5\\u672c\", \"limit\": 3, \"filters\": {\"zeta\": 1.5, \"alpha\": [\"b\", \"a\"], \"mid\": {\"b\": true, \"a\": null}}}"
+     }
+    }
+   ]
+  },
+  {
+   "role": "user",
+   "content": "Thanks, continue."
+  }
+ ],
+ "tools": [],
+ "prompt": "[INST] Look up café docs. [/INST]</s>[INST] Thanks, continue. [/INST]",
+ "tokens": [
+  1,
+  3,
+  29473,
+  7180,
+  1350,
+  29113,
+  6612,
+  29481,
+  29491,
+  29473,
+  4,
+  2,
+  3,
+  29473,
+  9636,
+  29493,
+  4456,
+  29491,
+  29473,
+  4
+ ],
+ "server_prompt_tokens": 20
+}

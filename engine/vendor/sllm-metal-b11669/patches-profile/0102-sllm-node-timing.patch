@@ -1,0 +1,280 @@
+--- a/src/ggml-metal/ggml-metal-context.m
++++ b/src/ggml-metal/ggml-metal-context.m
+@@ -338,6 +338,8 @@
+         }
+     }
+ 
++    ggml_metal_sllm_nodeprof_flush();
++
+     if (sllm_gpu_pending) {
+         sllm_gpu_pending = 0;
+         for (int cb_idx = 0; cb_idx <= ctx->n_cb; ++cb_idx) {
+--- a/src/ggml-metal/ggml-metal-device.h
++++ b/src/ggml-metal/ggml-metal-device.h
+@@ -73,6 +73,11 @@
+ typedef struct ggml_metal_encoder * ggml_metal_encoder_t;
+ 
+ ggml_metal_encoder_t ggml_metal_encoder_init(ggml_metal_cmd_buf_t cmd_buf_raw, bool concurrent);
++// SLLM profiling (patches-profile/0102): an encoder whose start and end GPU timestamps land in sample slot `slot`
++// (stage-boundary counter sampling); resolve copies 2 * n_slots ticks and returns the ns per tick (0 on failure)
++ggml_metal_encoder_t ggml_metal_encoder_init_sampled(ggml_metal_cmd_buf_t cmd_buf_raw, bool concurrent, int slot);
++double ggml_metal_sllm_nodeprof_resolve(int n_slots, uint64_t * ticks);
++int ggml_metal_sllm_nodeprof_max_slots(void);
+ void ggml_metal_encoder_free(ggml_metal_encoder_t encoder);
+ 
+ void ggml_metal_encoder_debug_group_push(ggml_metal_encoder_t encoder, const char * name);
+--- a/src/ggml-metal/ggml-metal-device.m
++++ b/src/ggml-metal/ggml-metal-device.m
+@@ -867,6 +867,96 @@
+     return res;
+ }
+ 
++// SLLM profiling (patches-profile/0102): per-encoder GPU timestamps
++#include <mach/mach_time.h>
++#define SLLM_NP_PER_BUF 2048
++#define SLLM_NP_NBUF    8
++static id<MTLCounterSampleBuffer> sllm_np_bufs[SLLM_NP_NBUF];
++static id<MTLDevice> sllm_np_dev = nil;
++static MTLTimestamp sllm_np_cpu0 = 0, sllm_np_gpu0 = 0;
++
++int ggml_metal_sllm_nodeprof_max_slots(void) {
++    return SLLM_NP_PER_BUF / 2 * SLLM_NP_NBUF;
++}
++
++static id<MTLCounterSampleBuffer> sllm_np_buf(id<MTLDevice> dev, int b) {
++    if (sllm_np_bufs[b]) {
++        return sllm_np_bufs[b];
++    }
++    @synchronized ([NSNull null]) {
++        if (sllm_np_bufs[b]) {
++            return sllm_np_bufs[b];
++        }
++        if (!sllm_np_dev) {
++            sllm_np_dev = [dev retain];
++            [dev sampleTimestamps:&sllm_np_cpu0 gpuTimestamp:&sllm_np_gpu0];
++            if (![dev supportsCounterSampling:MTLCounterSamplingPointAtStageBoundary]) {
++                GGML_ABORT("sllm nodeprof: no stage-boundary counter sampling on this device");
++            }
++        }
++        id<MTLCounterSet> ts = nil;
++        for (id<MTLCounterSet> cs in dev.counterSets) {
++            if ([cs.name isEqualToString:MTLCommonCounterSetTimestamp]) { ts = cs; }
++        }
++        if (!ts) {
++            GGML_ABORT("sllm nodeprof: no timestamp counter set");
++        }
++        MTLCounterSampleBufferDescriptor * d = [MTLCounterSampleBufferDescriptor new];
++        d.counterSet = ts;
++        d.storageMode = MTLStorageModeShared;
++        d.sampleCount = SLLM_NP_PER_BUF;
++        NSError * err = nil;
++        id<MTLCounterSampleBuffer> buf = [dev newCounterSampleBufferWithDescriptor:d error:&err];
++        [d release];
++        if (!buf) {
++            GGML_ABORT("sllm nodeprof: newCounterSampleBuffer failed: %s", err ? [[err localizedDescription] UTF8String] : "?");
++        }
++        sllm_np_bufs[b] = buf;
++    }
++    return sllm_np_bufs[b];
++}
++
++ggml_metal_encoder_t ggml_metal_encoder_init_sampled(ggml_metal_cmd_buf_t cmd_buf_raw, bool concurrent, int slot) {
++    ggml_metal_encoder_t res = calloc(1, sizeof(struct ggml_metal_encoder));
++    id<MTLCommandBuffer> cmd_buf = (id<MTLCommandBuffer>) cmd_buf_raw;
++    const int b = slot / (SLLM_NP_PER_BUF / 2), s = slot % (SLLM_NP_PER_BUF / 2);
++    MTLComputePassDescriptor * pd = [MTLComputePassDescriptor computePassDescriptor];
++    pd.dispatchType = concurrent ? MTLDispatchTypeConcurrent : MTLDispatchTypeSerial;
++    pd.sampleBufferAttachments[0].sampleBuffer = sllm_np_buf(cmd_buf.device, b);
++    pd.sampleBufferAttachments[0].startOfEncoderSampleIndex = 2 * s;
++    pd.sampleBufferAttachments[0].endOfEncoderSampleIndex = 2 * s + 1;
++    res->obj = [cmd_buf computeCommandEncoderWithDescriptor:pd];
++    [res->obj retain];
++    return res;
++}
++
++double ggml_metal_sllm_nodeprof_resolve(int n_slots, uint64_t * ticks) {
++    if (!sllm_np_dev || n_slots <= 0) {
++        return 0.0;
++    }
++    const int per = SLLM_NP_PER_BUF / 2;
++    for (int b = 0; b * per < n_slots && b < SLLM_NP_NBUF; ++b) {
++        const int n = MIN(per, n_slots - b * per);
++        if (!sllm_np_bufs[b]) {
++            memset(ticks + 2 * b * per, 0, 2 * n * sizeof(uint64_t));
++            continue;
++        }
++        NSData * d = [sllm_np_bufs[b] resolveCounterRange:NSMakeRange(0, 2 * n)];
++        if (!d) {
++            memset(ticks + 2 * b * per, 0, 2 * n * sizeof(uint64_t));
++            continue;
++        }
++        memcpy(ticks + 2 * b * per, d.bytes, MIN(d.length, 2 * n * sizeof(uint64_t)));
++    }
++    // GPU ticks to ns: the CPU/GPU timestamp pairs at the first buffer and now (sampleTimestamps' CPU side is ns)
++    MTLTimestamp c1 = 0, g1 = 0;
++    [sllm_np_dev sampleTimestamps:&c1 gpuTimestamp:&g1];
++    if (g1 <= sllm_np_gpu0) {
++        return 1.0;
++    }
++    return (double) (c1 - sllm_np_cpu0) / (double) (g1 - sllm_np_gpu0);
++}
++
+ void ggml_metal_encoder_free(ggml_metal_encoder_t encoder) {
+     [encoder->obj release];
+     free(encoder);
+--- a/src/ggml-metal/ggml-metal-ops.cpp
++++ b/src/ggml-metal/ggml-metal-ops.cpp
+@@ -47,6 +47,7 @@
+         int  debug_graph) {
+         this->dev             = dev;
+         this->lib             = ggml_metal_device_get_library(dev);
++        this->cmd_buf         = cmd_buf;
+         this->enc             = ggml_metal_encoder_init(cmd_buf, use_concurrency);
+         this->mem_ranges      = ggml_mem_ranges_init(debug_graph);
+         this->finfo           = finfo;
+@@ -107,6 +108,7 @@
+     ggml_metal_device_t  dev;
+     ggml_metal_library_t lib;
+     ggml_metal_encoder_t enc;
++    ggml_metal_cmd_buf_t cmd_buf;
+     ggml_mem_ranges_t    mem_ranges;
+ 
+     // shared fusion debugging context
+@@ -542,12 +544,124 @@
+     return n_fuse;
+ }
+ 
++// SLLM profiling (patches-profile/0102)
++#include <atomic>
++#include <cstdio>
++#include <mutex>
++#include <string>
++struct sllm_np_meta {
++    std::string line; // the JSON fields of the op (without the timing)
++};
++static int sllm_np_mode = -1; // -1 unknown, 0 off, 1 on
++static std::atomic<int> sllm_np_next{0};
++static std::vector<sllm_np_meta> sllm_np_metas;
++static std::mutex sllm_np_mu;
++static long sllm_np_graph = 0;
++
++static bool sllm_np_on() {
++    if (sllm_np_mode < 0) {
++        sllm_np_mode = getenv("SLLM_METAL_NODEPROF") != nullptr;
++        if (sllm_np_mode) {
++            sllm_np_metas.resize(ggml_metal_sllm_nodeprof_max_slots());
++        }
++    }
++    return sllm_np_mode == 1;
++}
++
++static void sllm_np_tensor(std::string & s, const char * key, const ggml_tensor * t) {
++    char b[512];
++    if (!t) {
++        return;
++    }
++    snprintf(b, sizeof(b), ",\"%s\":{\"name\":\"%s\",\"type\":\"%s\",\"op\":\"%s\",\"ne\":[%lld,%lld,%lld,%lld],\"nb\":[%zu,%zu,%zu,%zu],\"cont\":%d}",
++            key, t->name, ggml_type_name(t->type), ggml_op_name(t->op), (long long) t->ne[0], (long long) t->ne[1], (long long) t->ne[2],
++            (long long) t->ne[3], t->nb[0], t->nb[1], t->nb[2], t->nb[3], ggml_is_contiguous(t) ? 1 : 0);
++    s += b;
++}
++
++static int sllm_np_skip(const ggml_tensor * node) {
++    if (ggml_is_empty(node)) {
++        return 1;
++    }
++    switch (node->op) {
++        case GGML_OP_NONE: case GGML_OP_RESHAPE: case GGML_OP_VIEW: case GGML_OP_TRANSPOSE: case GGML_OP_PERMUTE: return 1;
++        default: break;
++    }
++    return (node->flags & GGML_TENSOR_FLAG_COMPUTE) == 0;
++}
++
++void ggml_metal_sllm_nodeprof_flush(void) {
++    if (!sllm_np_on()) {
++        return;
++    }
++    const int n = std::min(sllm_np_next.load(), ggml_metal_sllm_nodeprof_max_slots());
++    if (n == 0) {
++        return;
++    }
++    std::vector<uint64_t> ticks(2 * n);
++    const double ns = ggml_metal_sllm_nodeprof_resolve(n, ticks.data());
++    FILE * f = fopen(getenv("SLLM_METAL_NODEPROF"), "a");
++    if (f) {
++        for (int i = 0; i < n; ++i) {
++            fprintf(f, "{\"graph\":%ld,\"slot\":%d,\"t0_ns\":%.1f,\"t1_ns\":%.1f%s}\n", sllm_np_graph, i, ticks[2 * i] * ns,
++                    ticks[2 * i + 1] * ns, sllm_np_metas[i].line.c_str());
++        }
++        fclose(f);
++    }
++    sllm_np_graph++;
++    sllm_np_next.store(0);
++}
++
+ int ggml_metal_op_encode(ggml_metal_op_t ctx, int idx) {
++    int sllm_slot = -1;
++    if (sllm_np_on() && !sllm_np_skip(ctx->node(idx))) {
++        sllm_slot = sllm_np_next.fetch_add(1);
++        if (sllm_slot < ggml_metal_sllm_nodeprof_max_slots()) {
++            ggml_metal_encoder_end_encoding(ctx->enc);
++            ggml_metal_encoder_free(ctx->enc);
++            ctx->enc = ggml_metal_encoder_init_sampled(ctx->cmd_buf, ctx->use_concurrency, sllm_slot);
++            if (ctx->mem_ranges) {
++                ggml_mem_ranges_reset(ctx->mem_ranges);
++            }
++        } else {
++            sllm_slot = -1;
++        }
++    }
++
+     if (ctx->use_capture) {
+         ggml_metal_encoder_debug_group_push(ctx->enc, ggml_op_desc(ctx->node(idx)));
+     }
+ 
+     int res = ggml_metal_op_encode_impl(ctx, idx);
++
++    if (sllm_slot >= 0) {
++        std::string s;
++        char b[256];
++        snprintf(b, sizeof(b), ",\"n_fuse\":%d,\"ops\":\"", res);
++        s += b;
++        for (int i = 0; i < res; ++i) {
++            s += ggml_op_name(ctx->node(idx + i)->op);
++            s += i + 1 < res ? "+" : "\"";
++        }
++        if (res <= 0) {
++            s += "\"";
++        }
++        const ggml_tensor * last = ctx->node(idx + std::max(res, 1) - 1);
++        sllm_np_tensor(s, "dst", last);
++        const ggml_tensor * node = ctx->node(idx);
++        sllm_np_tensor(s, "first", node);
++        sllm_np_tensor(s, "src0", node->src[0]);
++        sllm_np_tensor(s, "src1", node->src[1]);
++        sllm_np_tensor(s, "src2", node->src[2]);
++        sllm_np_tensor(s, "src3", node->src[3]);
++        char p[160];
++        snprintf(p, sizeof(p), ",\"op_params\":[%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d]", node->op_params[0], node->op_params[1],
++                node->op_params[2], node->op_params[3], node->op_params[4], node->op_params[5], node->op_params[6], node->op_params[7],
++                node->op_params[8], node->op_params[9], node->op_params[10], node->op_params[11], node->op_params[12], node->op_params[13],
++                node->op_params[14], node->op_params[15]);
++        s += p;
++        sllm_np_metas[sllm_slot].line = std::move(s);
++    }
+     if (idx + res > ctx->n_nodes()) {
+         GGML_ABORT("fusion error: nodes spanning multiple encoders have been fused. this indicates a bug in the fusion logic %s",
+                 "https://github.com/ggml-org/llama.cpp/pull/14849");
+--- a/src/ggml-metal/ggml-metal-ops.h
++++ b/src/ggml-metal/ggml-metal-ops.h
+@@ -27,6 +27,10 @@
+ 
+ int ggml_metal_op_encode(ggml_metal_op_t ctx, int idx);
+ 
++// SLLM profiling (patches-profile/0102): SLLM_METAL_NODEPROF=<path> gives every encoded op its own compute encoder
++// with GPU timestamps; flush (after the graph's command buffers completed) appends one JSON line per op to <path>
++void ggml_metal_sllm_nodeprof_flush(void);
++
+ //
+ // available ops:
+ //

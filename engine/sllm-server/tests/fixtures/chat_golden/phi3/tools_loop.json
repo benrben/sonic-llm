@@ -1,0 +1,179 @@
+{
+ "family": "phi3",
+ "gguf": "Phi-3.5-mini-instruct-Q4_0.gguf",
+ "conversation": "tools_loop",
+ "messages": [
+  {
+   "role": "system",
+   "content": "You are a helpful assistant."
+  },
+  {
+   "role": "user",
+   "content": "Look up café docs and the weather in Zürich."
+  },
+  {
+   "role": "assistant",
+   "content": "",
+   "tool_calls": [
+    {
+     "id": "call_1",
+     "type": "function",
+     "function": {
+      "name": "search_docs",
+      "arguments": "{\"query\": \"caf\\u00e9 \\u65e5\\u672c\", \"limit\": 3, \"filters\": {\"zeta\": 1.5, \"alpha\": [\"b\", \"a\"], \"mid\": {\"b\": true, \"a\": null}}}"
+     }
+    },
+    {
+     "id": "call_2",
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "arguments": "{\"city\": \"Z\\u00fcrich\", \"unit\": \"celsius\"}"
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_1",
+   "content": "3 hits: café.md, menu.md"
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_2",
+   "content": "12 C, clear"
+  }
+ ],
+ "tools": [
+  {
+   "type": "function",
+   "function": {
+    "name": "search_docs",
+    "description": "Search the docs, e.g. for “café” — 日本語 ok",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "query": {
+       "type": "string",
+       "description": "free text"
+      },
+      "limit": {
+       "type": "integer"
+      },
+      "filters": {
+       "type": "object",
+       "properties": {
+        "zeta": {
+         "type": "number"
+        },
+        "alpha": {
+         "type": "array",
+         "items": {
+          "type": "string",
+          "enum": [
+           "b",
+           "a",
+           "c"
+          ]
+         }
+        },
+        "mid": {
+         "type": "object",
+         "properties": {
+          "b": {
+           "type": "boolean"
+          },
+          "a": {
+           "type": "string"
+          }
+         }
+        }
+       }
+      }
+     },
+     "required": [
+      "query"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "get_weather",
+    "description": "Weather for a city",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "unit": {
+       "type": "string",
+       "enum": [
+        "celsius",
+        "fahrenheit"
+       ]
+      },
+      "city": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "city"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "ping",
+    "description": "No arguments",
+    "parameters": {
+     "type": "object",
+     "properties": {}
+    }
+   }
+  }
+ ],
+ "prompt": "<|system|>\nYou are a helpful assistant.<|end|>\n<|user|>\nLook up café docs and the weather in Zürich.<|end|>\n<|assistant|>\n<|end|>\n<|assistant|>\n",
+ "tokens": [
+  32006,
+  29871,
+  13,
+  3492,
+  526,
+  263,
+  8444,
+  20255,
+  29889,
+  32007,
+  29871,
+  13,
+  32010,
+  29871,
+  13,
+  14959,
+  701,
+  274,
+  28059,
+  10561,
+  322,
+  278,
+  14826,
+  297,
+  24931,
+  29889,
+  32007,
+  29871,
+  13,
+  32001,
+  29871,
+  13,
+  32007,
+  29871,
+  13,
+  32001,
+  29871,
+  13
+ ],
+ "server_prompt_tokens": 38
+}

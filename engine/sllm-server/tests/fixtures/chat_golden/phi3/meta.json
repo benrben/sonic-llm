@@ -1,0 +1,10 @@
+{
+ "family": "phi3",
+ "now_as_utc": 1793377128,
+ "gguf": "Phi-3.5-mini-instruct-Q4_0.gguf",
+ "llama_server": "b11669-620d2225c",
+ "bos_token": "<s>",
+ "eos_token": "<|endoftext|>",
+ "chat_template_sha256": "78d976a442bcde2f0be15aafbb8e3050e1104f86732266f68403251b89982a90",
+ "generations": 4
+}

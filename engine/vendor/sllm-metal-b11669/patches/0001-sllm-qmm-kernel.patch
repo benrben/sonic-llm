@@ -1,0 +1,762 @@
+SLLM patch 1/2 (D042): the qmm kernel (kernels/qmm.metal) and its dispatch/self-test/status unit (ggml-metal-qmm.{h,m}). New files only.
+Against llama.cpp b11669 (source tarball 620d222), applied with patch -p1 in ggml/.
+
+--- a/src/ggml-metal/kernels/qmm.metal
++++ b/src/ggml-metal/kernels/qmm.metal
+@@ -0,0 +1,217 @@
++// SLLM patch (decisions.md D042): batched quantized matmul for 9..128 token rows on the Metal 4 tensor API.
++//
++//   dst[n][m] = sum_k src0[m][k] * src1[n][k]     src0: Q4_0 / Q4_1 / Q6_K rows (ggml block layout), src1: f32, dst: f32
++//
++// The kernel of the phase 2 qmm spike (sllm/bench/phase2-qmm/qmm.metal, kernel_qmm2 with T = 1), unchanged in its math:
++// - one threadgroup = NSG simdgroups x SN weight rows (TM = 64 rows) x NT token rows (16 up to 16 tokens, else 32);
++// - each simdgroup dequantizes its weight rows straight into the right-input cooperative tensor of a single-simdgroup
++//   matmul2d (registers; the weights never go through threadgroup memory);
++// - the activations are read from device memory as the left operand (rounded to half inside matmul2d, relaxed
++//   precision, the same as ggml's tensor-API mul_mm);
++// - Q4_0 / Q4_1 load the next K chunk's weight bytes while the current chunk multiplies; Q6_K does not;
++// - optional split-K over grid z: slice s writes its partial sums at dst + s*N*ldd, kernel_sllm_qmm_reduce adds
++//   them into slice 0 (= dst) in place.
++//
++// The register layout of the right-input cooperative tensor is not documented. It was probed on the M5
++// (sllm/bench/phase2-qmm/dev/probe.metal): the SN x KC tile is split into 16x16 sub-tiles, n-sub-tile fastest; in each,
++// a lane holds rows nb..nb+3 at columns kb and kb+8. ggml-metal-qmm.m runs a self-test against a CPU reference at
++// device init and disables this path if the result does not match.
++
++#include "common.h"
++
++#if defined(GGML_METAL_HAS_TENSOR)
++
++using namespace mpp::tensor_ops;
++
++// same layout as ggml_metal_kargs_sllm_qmm in ggml-metal-qmm.h
++typedef struct {
++    int32_t K;
++    int32_t M;
++    int32_t N;
++    int32_t nb01;
++    int32_t ldx;
++    int32_t ldd;
++    int32_t ksplit;
++    int32_t pad;
++} ggml_metal_kargs_sllm_qmm;
++
++#define SLLM_QMM_TM  64
++#define SLLM_QMM_KC  32
++#define SLLM_QMM_NSG 2
++
++struct sllm_block_q4_0 { half d; uint8_t qs[16]; };
++struct sllm_block_q4_1 { half d; half m; uint8_t qs[16]; };
++struct sllm_block_q6_K { uint8_t ql[128]; uint8_t qh[64]; int8_t scales[16]; half d; };
++
++// four weights of one row at kk + t + {0, 8, 16, 24} (kk % 32 == 0, t in 0..7)
++static inline void sllm_deq4(device const sllm_block_q6_K * row, int kk, int t, thread half4 & w) {
++    device const sllm_block_q6_K & b = row[kk / 256];
++    const int l0 = kk % 256, h = l0 / 128, g = (l0 % 128) / 32;
++    device const uchar * ql = b.ql + 64*h + 32*(g & 1) + t;
++    device const uchar * qh = b.qh + 32*h + t;
++    const ushort shl = (g >= 2) ? 4 : 0, shh = 2*g;
++    const ushort4 lo = (ushort4(ql[0], ql[8], ql[16], ql[24]) >> shl) & 0xF;
++    const ushort4 hi = (ushort4(qh[0], qh[8], qh[16], qh[24]) >> shh) & 3;
++    const half4 q = half4(short4(lo | (hi << 4)) - 32);
++    const float d = b.d;
++    const half s0 = (half) (d * b.scales[8*h + 2*g]), s1 = (half) (d * b.scales[8*h + 2*g + 1]);
++    w = q * half4(s0, s0, s1, s1);
++}
++static inline void sllm_deq4(device const sllm_block_q4_0 * row, int kk, int t, thread half4 & w) {
++    device const sllm_block_q4_0 & b = row[kk / 32];
++    const ushort q0 = b.qs[t], q1 = b.qs[t + 8];
++    w = (half4(ushort4(q0 & 0xF, q1 & 0xF, q0 >> 4, q1 >> 4)) - 8.h) * b.d;
++}
++static inline void sllm_deq4(device const sllm_block_q4_1 * row, int kk, int t, thread half4 & w) {
++    device const sllm_block_q4_1 & b = row[kk / 32];
++    const ushort q0 = b.qs[t], q1 = b.qs[t + 8];
++    w = half4(ushort4(q0 & 0xF, q1 & 0xF, q0 >> 4, q1 >> 4)) * b.d + b.m;
++}
++
++// split dequant for software pipelining: ld4 issues the loads (next K chunk, before the matmul of the current one),
++// cv4 turns the raw values into four halfs (after the matmul)
++struct sllm_raw_q4_0 { half d; ushort q0, q1; };
++struct sllm_raw_q4_1 { half d, m; ushort q0, q1; };
++template <typename BQ> struct sllm_raw_of { typedef sllm_raw_q4_0 type; };
++template <> struct sllm_raw_of<sllm_block_q4_1> { typedef sllm_raw_q4_1 type; };
++
++static inline void sllm_ld4(device const sllm_block_q4_0 * row, int kk, int t, thread sllm_raw_q4_0 & r) {
++    device const sllm_block_q4_0 & b = row[kk / 32]; r.d = b.d; r.q0 = b.qs[t]; r.q1 = b.qs[t + 8];
++}
++static inline void sllm_cv4(thread const sllm_raw_q4_0 & r, thread half4 & w) {
++    w = (half4(ushort4(r.q0 & 0xF, r.q1 & 0xF, r.q0 >> 4, r.q1 >> 4)) - 8.h) * r.d;
++}
++static inline void sllm_ld4(device const sllm_block_q4_1 * row, int kk, int t, thread sllm_raw_q4_1 & r) {
++    device const sllm_block_q4_1 & b = row[kk / 32]; r.d = b.d; r.m = b.m; r.q0 = b.qs[t]; r.q1 = b.qs[t + 8];
++}
++static inline void sllm_cv4(thread const sllm_raw_q4_1 & r, thread half4 & w) {
++    w = half4(ushort4(r.q0 & 0xF, r.q1 & 0xF, r.q0 >> 4, r.q1 >> 4)) * r.d + r.m;
++}
++// Q6_K never takes the prefetch path; these keep the template well formed
++static inline void sllm_ld4(device const sllm_block_q6_K *, int, int, thread sllm_raw_q4_0 &) {}
++
++template <typename BQ, int NT>
++kernel void kernel_sllm_qmm(
++        constant ggml_metal_kargs_sllm_qmm & a,
++        device const char  * W,
++        device const float * X,
++        device       float * D,
++        uint3  tg   [[threadgroup_position_in_grid]],
++        ushort sg   [[simdgroup_index_in_threadgroup]]) {
++    constexpr int TM  = SLLM_QMM_TM;
++    constexpr int KC  = SLLM_QMM_KC;
++    constexpr int SN  = TM / SLLM_QMM_NSG;
++    const int n0 = tg.x * NT;
++    const int r0 = tg.y * TM + sg * SN;
++    const int kb = tg.z * a.ksplit;
++    const int ke = min(a.K, kb + a.ksplit);
++
++    constexpr auto desc = matmul2d_descriptor(NT, SN, KC, false, false, true,
++                                              matmul2d_descriptor::mode::multiply_accumulate);
++    matmul2d<desc, execution_simdgroup> mm;
++
++    device const float * xb = X + (uint64_t) n0 * a.ldx;
++    const int nrem = clamp(a.N - n0, 0, NT);
++    auto tX0 = tensor((device float *) xb, dextents<int32_t, 2>(KC, NT), array<int, 2>({1, a.ldx}));
++    auto wR = mm.template get_right_input_cooperative_tensor<float, half, float>();
++    auto cT = mm.template get_destination_cooperative_tensor<decltype(tX0), decltype(wR), float>();
++    #pragma unroll
++    for (uint16_t i = 0; i < cT.get_capacity(); ++i) {
++        if (cT.is_valid_element(i)) cT[i] = 0.0f;
++    }
++
++    // element i = 8*sub + 4*e + j of wR  ->  (n = nb + 16*nsub + j, k = kb + 8*e + 16*ksub); nb, kb from element 0
++    constexpr int NSUB = SN / 16;
++    const auto ix0 = wR.get_multidimensional_index((uint16_t) 0);
++    const int nb = ix0[0], kbl = ix0[1];
++
++    constexpr bool PF = !is_same<BQ, sllm_block_q6_K>::value;
++    typedef typename sllm_raw_of<BQ>::type RAW;
++    constexpr int NRAW = NSUB * 4 * (KC / 32);
++    RAW raw[NRAW];
++    device const BQ * rps[NSUB * 4];
++    #pragma unroll
++    for (int nsub = 0; nsub < NSUB; ++nsub) {
++        #pragma unroll
++        for (int j = 0; j < 4; ++j) {
++            const int gr = min(r0 + nb + 16*nsub + j, a.M - 1);
++            rps[4*nsub + j] = (device const BQ *) (W + (uint64_t) gr * a.nb01);
++        }
++    }
++    #define SLLM_LOAD_RAW(kk) _Pragma("unroll") for (int q = 0; q < NSUB * 4; ++q) { \
++        _Pragma("unroll") for (int c = 0; c < KC / 32; ++c) sllm_ld4(rps[q], (kk) + 32*c, kbl, raw[q * (KC/32) + c]); }
++
++    if (PF) { SLLM_LOAD_RAW(kb) }
++    for (int k0 = kb; k0 < ke; k0 += KC) {
++        if (PF) {
++            #pragma unroll
++            for (int nsub = 0; nsub < NSUB; ++nsub) {
++                #pragma unroll
++                for (int j = 0; j < 4; ++j) {
++                    #pragma unroll
++                    for (int c = 0; c < KC / 32; ++c) {
++                        half4 w4;
++                        sllm_cv4(raw[(4*nsub + j) * (KC/32) + c], w4);
++                        wR[8*(nsub + NSUB*(2*c + 0)) + 0 + j] = w4[0];
++                        wR[8*(nsub + NSUB*(2*c + 0)) + 4 + j] = w4[1];
++                        wR[8*(nsub + NSUB*(2*c + 1)) + 0 + j] = w4[2];
++                        wR[8*(nsub + NSUB*(2*c + 1)) + 4 + j] = w4[3];
++                    }
++                }
++            }
++            if (k0 + KC < ke) { SLLM_LOAD_RAW(k0 + KC) }   // next chunk's loads are in flight during this matmul
++        } else {
++            #pragma unroll
++            for (int nsub = 0; nsub < NSUB; ++nsub) {
++                #pragma unroll
++                for (int j = 0; j < 4; ++j) {
++                    device const BQ * rp = rps[4*nsub + j];
++                    #pragma unroll
++                    for (int c = 0; c < KC / 32; ++c) {
++                        half4 w4;   // weights at k0 + 32c + kbl + {0, 8, 16, 24}
++                        sllm_deq4(rp, k0 + 32*c, kbl, w4);
++                        wR[8*(nsub + NSUB*(2*c + 0)) + 0 + j] = w4[0];
++                        wR[8*(nsub + NSUB*(2*c + 0)) + 4 + j] = w4[1];
++                        wR[8*(nsub + NSUB*(2*c + 1)) + 0 + j] = w4[2];
++                        wR[8*(nsub + NSUB*(2*c + 1)) + 4 + j] = w4[3];
++                    }
++                }
++            }
++        }
++        if (nrem > 0) {
++            auto tX = tensor((device float *) xb + k0, dextents<int32_t, 2>(KC, nrem), array<int, 2>({1, a.ldx}));
++            mm.run(tX, wR, cT);
++        }
++    }
++    #undef SLLM_LOAD_RAW
++
++    if (r0 >= a.M || nrem <= 0) return;
++    const int mrem = min(SN, a.M - r0);
++    device float * dt = D + (uint64_t) tg.z * a.N * a.ldd + (uint64_t) n0 * a.ldd + r0;
++    auto tD = tensor(dt, dextents<int32_t, 2>(mrem, nrem), array<int, 2>({1, a.ldd}));
++    cT.store(tD);
++}
++
++// sum the split-K partials in place: D[i] += sum_{s >= 1} D[s*N*ldd + i]   (N*ldd % 4 == 0, checked on the host)
++kernel void kernel_sllm_qmm_reduce(
++        constant ggml_metal_kargs_sllm_qmm & a,
++        device float * D,
++        uint gid [[thread_position_in_grid]]) {
++    const int S = (a.K + a.ksplit - 1) / a.ksplit;
++    const uint64_t total = (uint64_t) a.N * a.ldd;
++    if ((uint64_t) gid * 4 >= total) return;
++    device float4 * d4 = (device float4 *) D;
++    float4 acc = d4[gid];
++    for (int s = 1; s < S; ++s) acc += ((device const float4 *) (D + (uint64_t) s * total))[gid];
++    d4[gid] = acc;
++}
++
++#define SLLM_QMM_INST(BQ, NT) \
++    template [[host_name("kernel_sllm_qmm_" #BQ "_nt" #NT)]] kernel void kernel_sllm_qmm<sllm_block_##BQ, NT>( \
++        constant ggml_metal_kargs_sllm_qmm &, device const char *, device const float *, device float *, uint3, ushort);
++
++SLLM_QMM_INST(q4_0, 16) SLLM_QMM_INST(q4_0, 32)
++SLLM_QMM_INST(q4_1, 16) SLLM_QMM_INST(q4_1, 32)
++SLLM_QMM_INST(q6_K, 16) SLLM_QMM_INST(q6_K, 32)
++
++#endif // GGML_METAL_HAS_TENSOR
+--- a/src/ggml-metal/ggml-metal-qmm.h
++++ b/src/ggml-metal/ggml-metal-qmm.h
+@@ -0,0 +1,58 @@
++// SLLM patch (decisions.md D042): dispatch, self-test and status of the batched quantized matmul (kernels/qmm.metal).
++#pragma once
++
++#include "ggml.h"
++#include "ggml-metal-device.h"
++
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++// kernel arguments; the same layout is declared in kernels/qmm.metal (kept out of ggml-metal-impl.h so that the
++// embedded sources of every official kernel stay byte-identical to b11669)
++typedef struct {
++    int32_t K;      // reduction length (ne00)
++    int32_t M;      // weight rows (ne01)
++    int32_t N;      // src1 rows (ne11*ne12*ne13)
++    int32_t nb01;   // bytes per weight row
++    int32_t ldx;    // floats per src1 row
++    int32_t ldd;    // floats per dst row
++    int32_t ksplit; // K length of one split-K slice (grid z)
++    int32_t pad;
++} ggml_metal_kargs_sllm_qmm;
++
++
++struct ggml_metal_sllm_qmm_plan {
++    enum ggml_type type; // GGML_TYPE_Q4_0, GGML_TYPE_Q4_1 or GGML_TYPE_Q6_K
++    int nt;              // token rows per threadgroup: 16 or 32
++    int S;               // split-K slices (1 = none); slices 1..S-1 live in the extra space after dst
++    ggml_metal_kargs_sllm_qmm args;
++};
++
++// true when the qmm path takes this MUL_MAT (enabled, supported layout, and (type, N) in the dispatch table);
++// a pure function of the tensor shapes and the process-wide state fixed at device init
++bool ggml_metal_sllm_qmm_plan_op(const struct ggml_tensor * op, struct ggml_metal_sllm_qmm_plan * plan);
++
++// bytes of split-K scratch the dst of this MUL_MAT needs beyond ggml_nbytes (0 when qmm does not take it)
++size_t ggml_metal_sllm_qmm_extra(const struct ggml_tensor * op);
++
++// encode the plan; false (nothing encoded) when a pipeline is missing or a buffer is misaligned
++bool ggml_metal_sllm_qmm_encode(ggml_metal_library_t lib, ggml_metal_encoder_t enc, const struct ggml_metal_sllm_qmm_plan * plan,
++        struct ggml_metal_buffer_id w, struct ggml_metal_buffer_id x, struct ggml_metal_buffer_id d);
++
++// called once by ggml_metal_device_init after the library is built: reads SLLM_QMM, runs the self-test
++void ggml_metal_sllm_qmm_device_init(ggml_metal_device_t dev, ggml_metal_library_t lib, bool has_tensor);
++
++// called by the library compile when kernels/qmm.metal fails to build (the rest of the library is unaffected)
++void ggml_metal_sllm_qmm_note_compile_failure(const char * msg);
++
++// exported: a JSON object describing the patch, the mode, the self-test and the dispatch count (thread-local buffer)
++const char * ggml_backend_metal_sllm_qmm_status(void);
++
++#ifdef __cplusplus
++}
++#endif
+--- a/src/ggml-metal/ggml-metal-qmm.m
++++ b/src/ggml-metal/ggml-metal-qmm.m
+@@ -0,0 +1,475 @@
++// SLLM patch (decisions.md D042): dispatch, self-test and status of the batched quantized matmul (kernels/qmm.metal).
++//
++// Mode (env SLLM_QMM, read once at device init):
++//   unset or "1"  auto: qmm takes a MUL_MAT when (type, N) is in the dispatch table below and the self-test passed
++//   "0"           off: every MUL_MAT goes through the official ggml path (A/B switch)
++//   "force"       test only: ignore the N table (any N >= 2), keep the type and layout conditions
++// SLLM_QMM_TRACE=1 logs every qmm dispatch (type, K, M, N, tile, split) at info level (tests only: it is per encode).
++//
++// Dispatch table (sllm/results/phase2-qmm, cold weights, the faster of qmm and ggml per type and N, both models):
++//   Q4_0, Q4_1: qmm for 9 <= N <= 128 (ggml's f32 MMA mat-vec wins at N = 8; N > 128 is unmeasured, so ggml)
++//   Q6_K:       qmm for 9 <= N <= 64  (ggml wins at N = 8 and N = 128; qmm's cost grows per 32-row tile)
++// N is the number of src1 rows: ne11*ne12*ne13 when the rows are uniformly strided, so the [K, n/2, 2] form of
++// SLLM's matmul split is one N = n matmul here. N = 1 (mul_mv) is never touched.
++
++#import "ggml-metal-qmm.h"
++
++#import "ggml-impl.h"
++
++#import <Foundation/Foundation.h>
++#import <Metal/Metal.h>
++
++#include <math.h>
++#include <stdatomic.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#define SLLM_QMM_TM 64
++#define SLLM_QMM_KC 32
++#define SLLM_QMM_NTHREADS 64 // 2 simdgroups
++
++enum sllm_qmm_mode { SLLM_QMM_MODE_AUTO = 0, SLLM_QMM_MODE_OFF = 1, SLLM_QMM_MODE_FORCE = 2 };
++
++static struct {
++    bool initialized;
++    bool active;
++    bool trace;
++    enum sllm_qmm_mode mode;
++    char reason[256];
++    bool compile_failed;
++    char compile_msg[256];
++    bool selftest_ran;
++    bool selftest_pass;
++    int  selftest_cases;
++    double selftest_worst_rel_rms;
++    double selftest_worst_max_rel;
++    double selftest_ms;
++    atomic_ullong dispatches;
++} g_qmm;
++
++void ggml_metal_sllm_qmm_note_compile_failure(const char * msg) {
++    g_qmm.compile_failed = true;
++    snprintf(g_qmm.compile_msg, sizeof(g_qmm.compile_msg), "%s", msg ? msg : "unknown");
++}
++
++static bool sllm_qmm_n_in_table(enum ggml_type type, int64_t n) {
++    if (g_qmm.mode == SLLM_QMM_MODE_FORCE) {
++        return n >= 2;
++    }
++    switch (type) {
++        case GGML_TYPE_Q4_0:
++        case GGML_TYPE_Q4_1: return n >= 9 && n <= 128;
++        case GGML_TYPE_Q6_K: return n >= 9 && n <= 64;
++        default:             return false;
++    }
++}
++
++// split-K so that small matrices still fill the GPU: aim for >= 256 threadgroups, keep >= 4 K chunks per slice
++static int sllm_qmm_pick_split(int64_t K, int64_t M, int64_t N, int nt) {
++    if ((N*M) % 4 != 0) {
++        return 1;
++    }
++    const int64_t tgs = ((M + SLLM_QMM_TM - 1)/SLLM_QMM_TM) * ((N + nt - 1)/nt);
++    const int64_t nk  = K/SLLM_QMM_KC;
++    int S = 1;
++    while (tgs*S < 256 && nk/(S*2) >= 4 && nk % (S*2) == 0) {
++        S *= 2;
++    }
++    return S;
++}
++
++static void sllm_qmm_fill_plan(struct ggml_metal_sllm_qmm_plan * p, enum ggml_type type, int64_t K, int64_t M, int64_t N,
++        int64_t nb01, int64_t ldx, int S) {
++    p->type = type;
++    p->nt   = N <= 16 ? 16 : 32;
++    p->S    = S > 0 ? S : sllm_qmm_pick_split(K, M, N, p->nt);
++    p->args.K      = (int32_t) K;
++    p->args.M      = (int32_t) M;
++    p->args.N      = (int32_t) N;
++    p->args.nb01   = (int32_t) nb01;
++    p->args.ldx    = (int32_t) ldx;
++    p->args.ldd    = (int32_t) M;
++    p->args.ksplit = (int32_t) (K/p->S);
++    p->args.pad    = 0;
++}
++
++bool ggml_metal_sllm_qmm_plan_op(const struct ggml_tensor * op, struct ggml_metal_sllm_qmm_plan * plan) {
++    if (!g_qmm.active || op->op != GGML_OP_MUL_MAT) {
++        return false;
++    }
++    const struct ggml_tensor * src0 = op->src[0];
++    const struct ggml_tensor * src1 = op->src[1];
++    if (!src0 || !src1) {
++        return false;
++    }
++    const enum ggml_type type = src0->type;
++    if (type != GGML_TYPE_Q4_0 && type != GGML_TYPE_Q4_1 && type != GGML_TYPE_Q6_K) {
++        return false;
++    }
++    if (src1->type != GGML_TYPE_F32 || op->type != GGML_TYPE_F32) {
++        return false;
++    }
++    // hinted mat-muls (FWHT etc.) keep their own path
++    if (ggml_get_op_params_i32(op, 1) != 0) {
++        return false;
++    }
++
++    const int64_t K = src0->ne[0];
++    const int64_t M = src0->ne[1];
++    // 2-D weights with contiguous blocks in each row
++    if (src0->ne[2] != 1 || src0->ne[3] != 1 || src0->nb[0] != ggml_type_size(type) || src0->nb[1] < (size_t) ggml_row_size(type, K)) {
++        return false;
++    }
++    if (K % SLLM_QMM_KC != 0 || src1->ne[0] != K || src0->nb[1] > INT32_MAX) {
++        return false;
++    }
++    // src1 rows uniformly strided (so ne11*ne12*ne13 rows are one matrix), 16-byte row stride
++    if (src1->nb[0] != sizeof(float) || src1->nb[1] % 16 != 0 ||
++        src1->nb[2] != src1->ne[1]*src1->nb[1] || src1->nb[3] != src1->ne[2]*src1->nb[2]) {
++        return false;
++    }
++    const int64_t N = src1->ne[1]*src1->ne[2]*src1->ne[3];
++    // dst contiguous [M, N]
++    if (op->ne[0] != M || op->ne[1]*op->ne[2]*op->ne[3] != N || !ggml_is_contiguous(op)) {
++        return false;
++    }
++    if (!sllm_qmm_n_in_table(type, N) || N*M > INT32_MAX || (int64_t) (src1->nb[1]/sizeof(float)) > INT32_MAX) {
++        return false;
++    }
++
++    if (plan) {
++        sllm_qmm_fill_plan(plan, type, K, M, N, (int64_t) src0->nb[1], (int64_t) (src1->nb[1]/sizeof(float)), 0);
++    }
++    return true;
++}
++
++size_t ggml_metal_sllm_qmm_extra(const struct ggml_tensor * op) {
++    struct ggml_metal_sllm_qmm_plan p;
++    if (!ggml_metal_sllm_qmm_plan_op(op, &p) || p.S <= 1) {
++        return 0;
++    }
++    return (size_t) (p.S - 1) * (size_t) p.args.N * (size_t) p.args.M * sizeof(float);
++}
++
++static const char * sllm_qmm_type_name(enum ggml_type type) {
++    switch (type) {
++        case GGML_TYPE_Q4_0: return "q4_0";
++        case GGML_TYPE_Q4_1: return "q4_1";
++        case GGML_TYPE_Q6_K: return "q6_K";
++        default:             return "none";
++    }
++}
++
++static struct ggml_metal_pipeline_with_params sllm_qmm_get_pipeline(ggml_metal_library_t lib, const char * base) {
++    struct ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, base);
++    if (!res.pipeline) {
++        res = ggml_metal_library_compile_pipeline(lib, base, base, NULL);
++    }
++    return res;
++}
++
++bool ggml_metal_sllm_qmm_encode(ggml_metal_library_t lib, ggml_metal_encoder_t enc, const struct ggml_metal_sllm_qmm_plan * plan,
++        struct ggml_metal_buffer_id w, struct ggml_metal_buffer_id x, struct ggml_metal_buffer_id d) {
++    if (x.offs % 16 != 0 || d.offs % 16 != 0) {
++        return false;
++    }
++    char base[64];
++    snprintf(base, sizeof(base), "kernel_sllm_qmm_%s_nt%d", sllm_qmm_type_name(plan->type), plan->nt);
++    struct ggml_metal_pipeline_with_params ppl = sllm_qmm_get_pipeline(lib, base);
++    if (!ppl.pipeline) {
++        return false;
++    }
++    struct ggml_metal_pipeline_with_params ppl_red = { 0 };
++    if (plan->S > 1) {
++        ppl_red = sllm_qmm_get_pipeline(lib, "kernel_sllm_qmm_reduce");
++        if (!ppl_red.pipeline) {
++            return false;
++        }
++    }
++
++    ggml_metal_kargs_sllm_qmm args = plan->args;
++
++    ggml_metal_encoder_set_pipeline(enc, ppl);
++    ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
++    ggml_metal_encoder_set_buffer  (enc, w, 1);
++    ggml_metal_encoder_set_buffer  (enc, x, 2);
++    ggml_metal_encoder_set_buffer  (enc, d, 3);
++    ggml_metal_encoder_dispatch_threadgroups(enc, (args.N + plan->nt - 1)/plan->nt, (args.M + SLLM_QMM_TM - 1)/SLLM_QMM_TM, plan->S,
++            SLLM_QMM_NTHREADS, 1, 1);
++
++    if (plan->S > 1) {
++        // the reduce reads every slice: wait for the partials
++        ggml_metal_encoder_memory_barrier(enc);
++
++        const int64_t n4 = ((int64_t) args.N * args.M)/4;
++        ggml_metal_encoder_set_pipeline(enc, ppl_red);
++        ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
++        ggml_metal_encoder_set_buffer  (enc, d, 1);
++        ggml_metal_encoder_dispatch_threadgroups(enc, (int) ((n4 + 255)/256), 1, 1, 256, 1, 1);
++    }
++
++    atomic_fetch_add(&g_qmm.dispatches, 1);
++    if (g_qmm.trace) {
++        GGML_LOG_INFO("sllm_qmm: %s K=%d M=%d N=%d nt=%d S=%d\n", sllm_qmm_type_name(plan->type), args.K, args.M, args.N, plan->nt, plan->S);
++    }
++    return true;
++}
++
++//
++// self-test: every type, a partial row tile (M = 96), both token tiles (N = 16, 20) and split-K (N = 40, S = 4),
++// against a CPU reference that dequantizes exactly as ggml's dequantize_row_* and accumulates in double
++//
++
++static uint64_t sllm_rng(uint64_t * s) {
++    *s ^= *s << 13; *s ^= *s >> 7; *s ^= *s << 17;
++    return *s;
++}
++static float sllm_rngf(uint64_t * s) { // uniform in [0, 1)
++    return (float) (sllm_rng(s) >> 40) / (float) (1ull << 24);
++}
++static uint16_t sllm_f2h(float f) { __fp16 h = (__fp16) f; uint16_t u; memcpy(&u, &h, 2); return u; }
++static float    sllm_h2f(uint16_t u) { __fp16 h; memcpy(&h, &u, 2); return (float) h; }
++
++static size_t sllm_block_bytes(enum ggml_type t) { return t == GGML_TYPE_Q6_K ? 210 : t == GGML_TYPE_Q4_1 ? 20 : 18; }
++static int    sllm_block_k    (enum ggml_type t) { return t == GGML_TYPE_Q6_K ? 256 : 32; }
++
++static void sllm_fill_row(enum ggml_type t, uint8_t * row, int K, uint64_t * s) {
++    const size_t bb = sllm_block_bytes(t);
++    for (int b = 0; b < K/sllm_block_k(t); ++b) {
++        uint8_t * p = row + b*bb;
++        for (size_t i = 0; i < bb; ++i) p[i] = (uint8_t) sllm_rng(s);
++        uint16_t h;
++        if (t == GGML_TYPE_Q4_0) {
++            h = sllm_f2h(0.005f + 0.02f*sllm_rngf(s)); memcpy(p, &h, 2);
++        } else if (t == GGML_TYPE_Q4_1) {
++            const float d = 0.005f + 0.02f*sllm_rngf(s);
++            h = sllm_f2h(d);        memcpy(p, &h, 2);
++            h = sllm_f2h(-8.0f*d*(0.5f + sllm_rngf(s))); memcpy(p + 2, &h, 2);
++        } else {
++            for (int i = 0; i < 16; ++i) p[192 + i] = (uint8_t) (int8_t) (int) (sllm_rngf(s)*100.0f - 50.0f);
++            h = sllm_f2h(0.0005f + 0.001f*sllm_rngf(s)); memcpy(p + 208, &h, 2);
++        }
++    }
++}
++
++// ggml dequantize_row_q4_0 / q4_1 / q6_K
++static void sllm_dequant_row(enum ggml_type t, const uint8_t * row, int K, float * y) {
++    const size_t bb = sllm_block_bytes(t);
++    for (int b = 0; b < K/sllm_block_k(t); ++b) {
++        const uint8_t * p = row + b*bb;
++        if (t == GGML_TYPE_Q4_0 || t == GGML_TYPE_Q4_1) {
++            uint16_t hd; memcpy(&hd, p, 2);
++            const float d = sllm_h2f(hd);
++            float m = 0.0f;
++            const uint8_t * qs = p + 2;
++            if (t == GGML_TYPE_Q4_1) { uint16_t hm; memcpy(&hm, p + 2, 2); m = sllm_h2f(hm); qs = p + 4; }
++            for (int j = 0; j < 16; ++j) {
++                const int x0 = qs[j] & 0xF, x1 = qs[j] >> 4;
++                if (t == GGML_TYPE_Q4_0) { y[b*32 + j] = (x0 - 8)*d; y[b*32 + j + 16] = (x1 - 8)*d; }
++                else                     { y[b*32 + j] = x0*d + m;   y[b*32 + j + 16] = x1*d + m; }
++            }
++        } else {
++            const uint8_t * ql = p; const uint8_t * qh = p + 128; const int8_t * sc = (const int8_t *) (p + 192);
++            uint16_t hd; memcpy(&hd, p + 208, 2);
++            const float d = sllm_h2f(hd);
++            float * yy = y + b*256;
++            for (int n = 0; n < 256; n += 128) {
++                for (int l = 0; l < 32; ++l) {
++                    const int is = l/16;
++                    const int q1 = (int) ((ql[l +  0] & 0xF) | (((qh[l] >> 0) & 3) << 4)) - 32;
++                    const int q2 = (int) ((ql[l + 32] & 0xF) | (((qh[l] >> 2) & 3) << 4)) - 32;
++                    const int q3 = (int) ((ql[l +  0] >> 4)  | (((qh[l] >> 4) & 3) << 4)) - 32;
++                    const int q4 = (int) ((ql[l + 32] >> 4)  | (((qh[l] >> 6) & 3) << 4)) - 32;
++                    yy[l +  0] = d*sc[is + 0]*q1;
++                    yy[l + 32] = d*sc[is + 2]*q2;
++                    yy[l + 64] = d*sc[is + 4]*q3;
++                    yy[l + 96] = d*sc[is + 6]*q4;
++                }
++                yy += 128; ql += 64; qh += 32; sc += 8;
++            }
++        }
++    }
++}
++
++static bool sllm_qmm_selftest(ggml_metal_device_t dev, ggml_metal_library_t lib, char * why, size_t why_n) {
++    const enum ggml_type types[3] = { GGML_TYPE_Q4_0, GGML_TYPE_Q4_1, GGML_TYPE_Q6_K };
++    const int K = 512, M = 96;
++    const int Ns[3] = { 16, 20, 40 };
++    const int Ss[3] = { 1, 1, 4 };
++
++    id<MTLDevice> device = (id<MTLDevice>) ggml_metal_device_get_obj(dev);
++    if (!device) {
++        snprintf(why, why_n, "no MTLDevice");
++        return false;
++    }
++
++    bool ok = true;
++    const int64_t t0 = ggml_time_us();
++    double worst_rms = 0.0, worst_max = 0.0;
++    int cases = 0;
++
++    @autoreleasepool {
++        id<MTLCommandQueue> queue = [device newCommandQueue];
++        if (!queue) {
++            snprintf(why, why_n, "newCommandQueue failed");
++            return false;
++        }
++        for (int ti = 0; ti < 3 && ok; ++ti) {
++            const enum ggml_type t = types[ti];
++            const size_t rb = (size_t) (K/sllm_block_k(t))*sllm_block_bytes(t);
++            for (int ci = 0; ci < 3 && ok; ++ci) {
++                const int N = Ns[ci], S = Ss[ci];
++                uint64_t seed = 0x5EED0000ull + 131*ti + ci;
++                id<MTLBuffer> bw = [device newBufferWithLength:rb*M options:MTLResourceStorageModeShared];
++                id<MTLBuffer> bx = [device newBufferWithLength:(size_t) N*K*sizeof(float) options:MTLResourceStorageModeShared];
++                id<MTLBuffer> bd = [device newBufferWithLength:(size_t) S*N*M*sizeof(float) options:MTLResourceStorageModeShared];
++                if (!bw || !bx || !bd) {
++                    snprintf(why, why_n, "buffer allocation failed");
++                    ok = false;
++                }
++                if (ok) {
++                    uint8_t * w = (uint8_t *) [bw contents];
++                    float   * x = (float *)   [bx contents];
++                    float   * d = (float *)   [bd contents];
++                    for (int m = 0; m < M; ++m) sllm_fill_row(t, w + (size_t) m*rb, K, &seed);
++                    for (int i = 0; i < N*K; ++i) x[i] = 2.0f*sllm_rngf(&seed) - 1.0f;
++                    for (int i = 0; i < S*N*M; ++i) d[i] = NAN;
++
++                    struct ggml_metal_sllm_qmm_plan plan;
++                    sllm_qmm_fill_plan(&plan, t, K, M, N, (int64_t) rb, K, S);
++
++                    id<MTLCommandBuffer> cb = [queue commandBuffer];
++                    ggml_metal_encoder_t enc = ggml_metal_encoder_init((ggml_metal_cmd_buf_t) cb, false);
++                    const struct ggml_metal_buffer_id iw = { (void *) bw, 0 }, ix = { (void *) bx, 0 }, id_ = { (void *) bd, 0 };
++                    const bool enc_ok = ggml_metal_sllm_qmm_encode(lib, enc, &plan, iw, ix, id_);
++                    ggml_metal_encoder_end_encoding(enc);
++                    ggml_metal_encoder_free(enc);
++                    if (!enc_ok) {
++                        snprintf(why, why_n, "pipeline for %s nt%d not available", sllm_qmm_type_name(t), plan.nt);
++                        ok = false;
++                    } else {
++                        [cb commit];
++                        [cb waitUntilCompleted];
++                        if ([cb status] != MTLCommandBufferStatusCompleted) {
++                            snprintf(why, why_n, "command buffer failed: %s", [[[cb error] description] UTF8String]);
++                            ok = false;
++                        }
++                    }
++                    if (ok) {
++                        float * row = (float *) malloc((size_t) K*sizeof(float));
++                        double se = 0.0, sr = 0.0, maxerr = 0.0, maxref = 0.0;
++                        bool finite = true;
++                        for (int m = 0; m < M; ++m) {
++                            sllm_dequant_row(t, w + (size_t) m*rb, K, row);
++                            for (int n = 0; n < N; ++n) {
++                                double ref = 0.0;
++                                for (int k = 0; k < K; ++k) ref += (double) row[k]*(double) x[(size_t) n*K + k];
++                                const double got = d[(size_t) n*M + m];
++                                if (!isfinite(got)) finite = false;
++                                const double e = fabs(got - ref);
++                                se += e*e; sr += ref*ref;
++                                if (e > maxerr) maxerr = e;
++                                if (fabs(ref) > maxref) maxref = fabs(ref);
++                            }
++                        }
++                        free(row);
++                        const double rel_rms = sr > 0 ? sqrt(se/sr) : 1.0;
++                        const double max_rel = maxref > 0 ? maxerr/maxref : 1.0;
++                        if (rel_rms > worst_rms) worst_rms = rel_rms;
++                        if (max_rel > worst_max) worst_max = max_rel;
++                        ++cases;
++                        if (!finite || !(rel_rms < 3e-3) || !(max_rel < 1e-2)) {
++                            snprintf(why, why_n, "mismatch %s K=%d M=%d N=%d S=%d: rel_rms %.3g, max_abs/max_ref %.3g%s",
++                                     sllm_qmm_type_name(t), K, M, N, S, rel_rms, max_rel, finite ? "" : ", non-finite output");
++                            ok = false;
++                        }
++                    }
++                }
++                [bw release]; [bx release]; [bd release];
++            }
++        }
++        [queue release];
++    }
++
++    g_qmm.selftest_cases         = cases;
++    g_qmm.selftest_worst_rel_rms = worst_rms;
++    g_qmm.selftest_worst_max_rel = worst_max;
++    g_qmm.selftest_ms            = (ggml_time_us() - t0)/1e3;
++    return ok;
++}
++
++void ggml_metal_sllm_qmm_device_init(ggml_metal_device_t dev, ggml_metal_library_t lib, bool has_tensor) {
++    if (g_qmm.initialized) {
++        return;
++    }
++    g_qmm.initialized = true;
++    g_qmm.active = false;
++    atomic_store(&g_qmm.dispatches, 0);
++
++    const char * tr = getenv("SLLM_QMM_TRACE");
++    const char * env = getenv("SLLM_QMM");
++    if (env && strcmp(env, "0") == 0) {
++        g_qmm.mode = SLLM_QMM_MODE_OFF;
++    } else if (env && strcmp(env, "force") == 0) {
++        g_qmm.mode = SLLM_QMM_MODE_FORCE;
++    } else {
++        g_qmm.mode = SLLM_QMM_MODE_AUTO;
++    }
++
++    if (g_qmm.mode == SLLM_QMM_MODE_OFF) {
++        snprintf(g_qmm.reason, sizeof(g_qmm.reason), "disabled by SLLM_QMM=0");
++    } else if (!has_tensor) {
++        snprintf(g_qmm.reason, sizeof(g_qmm.reason), "no Metal 4 tensor API on this device");
++    } else if (!lib) {
++        snprintf(g_qmm.reason, sizeof(g_qmm.reason), "no Metal library");
++    } else if (g_qmm.compile_failed) {
++        snprintf(g_qmm.reason, sizeof(g_qmm.reason), "kernels/qmm.metal failed to compile: %s", g_qmm.compile_msg);
++    } else {
++        char why[200] = "";
++        g_qmm.selftest_ran  = true;
++        g_qmm.selftest_pass = sllm_qmm_selftest(dev, lib, why, sizeof(why));
++        if (g_qmm.selftest_pass) {
++            g_qmm.active = true;
++            snprintf(g_qmm.reason, sizeof(g_qmm.reason), "self-test passed");
++        } else {
++            snprintf(g_qmm.reason, sizeof(g_qmm.reason), "self-test failed: %s", why);
++        }
++        // the self-test's own dispatches are not counted
++        atomic_store(&g_qmm.dispatches, 0);
++    }
++    g_qmm.trace = tr && strcmp(tr, "1") == 0;
++
++    if (g_qmm.active) {
++        GGML_LOG_INFO("%s: SLLM qmm active (mode %s; self-test %d cases, worst rel rms %.2e, worst max/ref %.2e, %.1f ms)\n",
++                __func__, g_qmm.mode == SLLM_QMM_MODE_FORCE ? "force" : "auto", g_qmm.selftest_cases,
++                g_qmm.selftest_worst_rel_rms, g_qmm.selftest_worst_max_rel, g_qmm.selftest_ms);
++    } else if (g_qmm.mode == SLLM_QMM_MODE_OFF) {
++        GGML_LOG_INFO("%s: SLLM qmm off (%s)\n", __func__, g_qmm.reason);
++    } else {
++        GGML_LOG_WARN("%s: SLLM qmm disabled, using ggml for every mat-mul: %s\n", __func__, g_qmm.reason);
++    }
++}
++
++const char * ggml_backend_metal_sllm_qmm_status(void) {
++    static _Thread_local char buf[1024];
++    char reason[300];
++    // the reason is free text: keep it JSON-safe
++    size_t j = 0;
++    for (size_t i = 0; g_qmm.reason[i] && j + 2 < sizeof(reason); ++i) {
++        const char c = g_qmm.reason[i];
++        if (c == '"' || c == '\\') reason[j++] = '\\';
++        reason[j++] = (c == '\n' || c == '\r' || c == '\t') ? ' ' : c;
++    }
++    reason[j] = 0;
++    snprintf(buf, sizeof(buf),
++        "{\"patch\":\"sllm-qmm-1\",\"initialized\":%s,\"active\":%s,\"mode\":\"%s\",\"reason\":\"%s\","
++        "\"selftest\":{\"ran\":%s,\"pass\":%s,\"cases\":%d,\"worst_rel_rms\":%.3e,\"worst_max_rel\":%.3e,\"ms\":%.2f},"
++        "\"table\":\"q4_0,q4_1: 9<=N<=128; q6_K: 9<=N<=64\",\"dispatches\":%llu}",
++        g_qmm.initialized ? "true" : "false", g_qmm.active ? "true" : "false",
++        g_qmm.mode == SLLM_QMM_MODE_OFF ? "off" : g_qmm.mode == SLLM_QMM_MODE_FORCE ? "force" : "auto", reason,
++        g_qmm.selftest_ran ? "true" : "false", g_qmm.selftest_pass ? "true" : "false", g_qmm.selftest_cases,
++        g_qmm.selftest_worst_rel_rms, g_qmm.selftest_worst_max_rel, g_qmm.selftest_ms,
++        (unsigned long long) atomic_load(&g_qmm.dispatches));
++    return buf;
++}

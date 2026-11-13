@@ -1,0 +1,120 @@
+{
+ "family": "mistral",
+ "gguf": "Mistral-7B-Instruct-v0.3-Q4_K_M.gguf",
+ "conversation": "tools_no_system",
+ "messages": [
+  {
+   "role": "user",
+   "content": "Search for café docs, limit 3."
+  }
+ ],
+ "tools": [
+  {
+   "type": "function",
+   "function": {
+    "name": "search_docs",
+    "description": "Search the docs, e.g. for “café” — 日本語 ok",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "query": {
+       "type": "string",
+       "description": "free text"
+      },
+      "limit": {
+       "type": "integer"
+      },
+      "filters": {
+       "type": "object",
+       "properties": {
+        "zeta": {
+         "type": "number"
+        },
+        "alpha": {
+         "type": "array",
+         "items": {
+          "type": "string",
+          "enum": [
+           "b",
+           "a",
+           "c"
+          ]
+         }
+        },
+        "mid": {
+         "type": "object",
+         "properties": {
+          "b": {
+           "type": "boolean"
+          },
+          "a": {
+           "type": "string"
+          }
+         }
+        }
+       }
+      }
+     },
+     "required": [
+      "query"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "get_weather",
+    "description": "Weather for a city",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "unit": {
+       "type": "string",
+       "enum": [
+        "celsius",
+        "fahrenheit"
+       ]
+      },
+      "city": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "city"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "ping",
+    "description": "No arguments",
+    "parameters": {
+     "type": "object",
+     "properties": {}
+    }
+   }
+  }
+ ],
+ "prompt": "[INST] Search for café docs, limit 3. [/INST]",
+ "tokens": [
+  1,
+  3,
+  29473,
+  11915,
+  1122,
+  29113,
+  6612,
+  29481,
+  29493,
+  4375,
+  29473,
+  29538,
+  29491,
+  29473,
+  4
+ ],
+ "server_prompt_tokens": 15
+}

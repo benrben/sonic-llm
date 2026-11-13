@@ -1,0 +1,1056 @@
+SLLM patch 7 (phase 2 prefillattn): GQA-packed prefill flash attention (pfa): kernels/prefill.metal (new kind "prefill"),
+ggml-metal-pfa.{h,m} (plan, encoder, self-test, status, SLLM_PREFILL_CASCADE) and its hooks (source list, library kind,
+compile-failure note, init call, FLASH_ATTN_EXT branch after the decode cascade's, scratch). Per row the kernel does ggml's
+kernel_flash_attn_ext_tensor arithmetic, so its output is bitwise ggml's (checked by the init self-test).
+Against llama.cpp b11669 (source tarball 620d222) after patches 1-6, applied with patch -p1 in ggml/. Adds lines, except three of
+the hooks of patches 2 and 4 (the library kind list and the compile-failure branch, which now also name the prefill kind).
+
+diff -ruN a/src/ggml-metal/CMakeLists.txt b/src/ggml-metal/CMakeLists.txt
+--- a/src/ggml-metal/CMakeLists.txt	2026-10-27 04:25:41
++++ b/src/ggml-metal/CMakeLists.txt	2026-10-27 04:29:22
+@@ -16,6 +16,7 @@
+                          ggml-metal-qmm.m
+                          ggml-metal-cascade.m
+                          ggml-metal-cascadeq.m
++                         ggml-metal-pfa.m
+                         )
+ 
+ target_link_libraries(ggml-metal PRIVATE
+@@ -78,6 +79,7 @@
+     kernels/misc.metal
+     kernels/qmm.metal
+     kernels/cascade.metal
++    kernels/prefill.metal
+ )
+ 
+ if (GGML_METAL_EMBED_LIBRARY)
+diff -ruN a/src/ggml-metal/ggml-metal-device.m b/src/ggml-metal/ggml-metal-device.m
+--- a/src/ggml-metal/ggml-metal-device.m	2026-10-27 04:25:41
++++ b/src/ggml-metal/ggml-metal-device.m	2026-10-27 04:29:22
+@@ -8,6 +8,7 @@
+ #import "ggml-metal-qmm.h"
+ #import "ggml-metal-cascade.h"
+ #import "ggml-metal-cascadeq.h"
++#import "ggml-metal-pfa.h"
+ 
+ #include <Foundation/Foundation.h>
+ 
+@@ -150,7 +151,8 @@
+     X(POOL,            pool)           \
+     X(MISC,            misc)           \
+     X(QMM,             qmm)            \
+-    X(CASCADE,         cascade)
++    X(CASCADE,         cascade)        \
++    X(PREFILL,         prefill)
+ 
+ enum ggml_metal_lib_kind {
+ #define X(e, s) GGML_METAL_LIB_##e,
+@@ -369,11 +371,13 @@
+ 
+             t_per_lib[kind] = ggml_time_us() - t0;
+ 
+-            if (!lib && (kind == GGML_METAL_LIB_QMM || kind == GGML_METAL_LIB_CASCADE)) {
+-                // SLLM patch: a qmm or cascade compile failure only disables that path, never the library
++            if (!lib && (kind == GGML_METAL_LIB_QMM || kind == GGML_METAL_LIB_CASCADE || kind == GGML_METAL_LIB_PREFILL)) {
++                // SLLM patch: a qmm, cascade or prefill compile failure only disables that path, never the library
+                 const char * msg = err_per_lib[kind] ? [[err_per_lib[kind] description] UTF8String] : "unknown";
+                 if (kind == GGML_METAL_LIB_QMM) {
+                     ggml_metal_sllm_qmm_note_compile_failure(msg);
++                } else if (kind == GGML_METAL_LIB_PREFILL) {
++                    ggml_metal_sllm_pfa_note_compile_failure(msg);
+                 } else {
+                     ggml_metal_sllm_cascade_note_compile_failure(msg);
+                 }
+@@ -1337,6 +1341,8 @@
+                 ggml_metal_sllm_cascade_device_init(dev, dev->library, dev->props.has_tensor);
+                 // SLLM patch 6: the mixed-precision cascade (q8_0 own pages): its own self-test
+                 ggml_metal_sllm_cascadeq_device_init(dev, dev->library, dev->props.has_tensor);
++                // SLLM patch 7: the GQA-packed prefill attention (kernels/prefill.metal): its own self-test
++                ggml_metal_sllm_pfa_device_init(dev, dev->library, dev->props.has_tensor);
+ 
+                 if (dev->props.use_residency_sets) {
+                     dev->rsets = ggml_metal_rsets_init(dev);
+diff -ruN a/src/ggml-metal/ggml-metal-ops.cpp b/src/ggml-metal/ggml-metal-ops.cpp
+--- a/src/ggml-metal/ggml-metal-ops.cpp	2026-10-27 04:25:41
++++ b/src/ggml-metal/ggml-metal-ops.cpp	2026-10-27 04:29:22
+@@ -11,6 +11,7 @@
+ #include "ggml-metal-qmm.h"
+ #include "ggml-metal-cascade.h"
+ #include "ggml-metal-cascadeq.h"
++#include "ggml-metal-pfa.h"
+ #include "ggml-metal-tuning.h"
+ 
+ #include <cassert>
+@@ -3453,6 +3454,16 @@
+         ggml_metal_sllm_cascade_plan plan;
+         if (ggml_metal_sllm_cascade_plan_op(op, &plan) &&
+             ggml_metal_sllm_cascade_encode(lib, enc, &plan, ggml_metal_get_buffer_id(op->src[0]), ggml_metal_get_buffer_id(op->src[1]),
++                ggml_metal_get_buffer_id(op->src[2]), ggml_metal_get_buffer_id(op->src[3]), ggml_metal_get_buffer_id(op))) {
++            return 1;
++        }
++    }
++
++    // SLLM patch 7: GQA-packed prefill attention (kernels/prefill.metal) for prefill chunks that sllm-core hinted
++    {
++        ggml_metal_sllm_pfa_plan plan;
++        if (ggml_metal_sllm_pfa_plan_op(op, &plan) &&
++            ggml_metal_sllm_pfa_encode(lib, enc, &plan, ggml_metal_get_buffer_id(op->src[0]), ggml_metal_get_buffer_id(op->src[1]),
+                 ggml_metal_get_buffer_id(op->src[2]), ggml_metal_get_buffer_id(op->src[3]), ggml_metal_get_buffer_id(op))) {
+             return 1;
+         }
+diff -ruN a/src/ggml-metal/ggml-metal-pfa.h b/src/ggml-metal/ggml-metal-pfa.h
+--- a/src/ggml-metal/ggml-metal-pfa.h	1970-01-01 02:00:00
++++ b/src/ggml-metal/ggml-metal-pfa.h	2026-10-27 04:27:11
+@@ -0,0 +1,81 @@
++// SLLM patch 7 (phase 2 prefillattn): dispatch, self-test and status of the GQA-packed prefill attention ("pfa",
++// kernels/prefill.metal).
++//
++// The hint: sllm-core marks the GGML_OP_FLASH_ATTN_EXT of a prefill chunk in a multi-item step by writing
++//   op_params[13] = GGML_METAL_SLLM_PFA_MAGIC
++// a slot official ggml never reads (it uses 0..4). The decode cascade (patch 0004) uses the same slot with its own
++// magic and op_params[14..15]; a prefill chunk never carries both. The mixed-precision mark (patch 0006, op_params[8])
++// takes precedence: a marked op never reaches this path. The kernel is a drop-in for ggml's own kernels on the op (the
++// same inputs and output, only the rounding differs); without the magic, or when a condition below fails, the op runs
++// ggml's own kernels.
++#pragma once
++
++#include "ggml.h"
++#include "ggml-metal-device.h"
++
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define GGML_METAL_SLLM_PFA_MAGIC 0x534C5046 // "SLPF"
++
++// kernel arguments; the same layout is declared in kernels/prefill.metal
++typedef struct {
++    int32_t ne01;    // tokens of the op
++    int32_t H;       // query heads
++    int32_t HKV;     // KV heads
++    int32_t ne11;    // cells of the K/V view (a multiple of C)
++    int32_t nblk0;   // C-cell blocks the kernel walks: ne11 / C
++    int32_t blk_ld;  // blk row stride: ceil(ne30 / C)
++    int32_t ntile;   // row tiles per KV head: ceil(ne01 / (RT/G))
++    int32_t pad0;
++    uint64_t nb01, nb02;   // q strides (bytes)
++    uint64_t nb11, nb12;   // k strides
++    uint64_t nb21, nb22;   // v strides
++    uint64_t nb31;         // mask row stride
++    uint64_t nb1;          // dst token stride
++    float scale;
++    int32_t pad1;
++} ggml_metal_kargs_sllm_pfa;
++
++struct ggml_metal_sllm_pfa_plan {
++    int D;      // head size (128 or 256)
++    int G;      // H / HKV (2 or 4)
++    int rt;     // rows per threadgroup (RT/G tokens x G heads)
++    int c;      // cells per block
++    int ne30;   // mask width (blk columns)
++    int ne31;   // mask rows
++    // scratch after dst (offsets from the end of dst, bytes)
++    size_t off_blk, off_qh, extra;
++    ggml_metal_kargs_sllm_pfa args;
++};
++
++// true when the pfa path takes this FLASH_ATTN_EXT (enabled, hinted, supported shapes and layout); a pure function of
++// the tensor and the process-wide state fixed at device init
++bool ggml_metal_sllm_pfa_plan_op(const struct ggml_tensor * op, struct ggml_metal_sllm_pfa_plan * plan);
++
++// bytes of scratch the dst of this FLASH_ATTN_EXT needs beyond ggml_nbytes (0 when pfa does not take it)
++size_t ggml_metal_sllm_pfa_extra(const struct ggml_tensor * op);
++
++// encode the plan (blk + Q stage, barrier, pfa); false (nothing encoded) when a pipeline is missing or a buffer is
++// misaligned
++bool ggml_metal_sllm_pfa_encode(ggml_metal_library_t lib, ggml_metal_encoder_t enc, const struct ggml_metal_sllm_pfa_plan * plan,
++        struct ggml_metal_buffer_id q, struct ggml_metal_buffer_id k, struct ggml_metal_buffer_id v,
++        struct ggml_metal_buffer_id mask, struct ggml_metal_buffer_id dst);
++
++// called once by ggml_metal_device_init after the library is built: reads SLLM_PREFILL_CASCADE, runs the self-test
++void ggml_metal_sllm_pfa_device_init(ggml_metal_device_t dev, ggml_metal_library_t lib, bool has_tensor);
++
++// called by the library compile when kernels/prefill.metal fails to build (the rest of the library is unaffected)
++void ggml_metal_sllm_pfa_note_compile_failure(const char * msg);
++
++// exported: a JSON object describing the patch, the mode, the self-test and the dispatch count (thread-local buffer)
++const char * ggml_backend_metal_sllm_prefill_status(void);
++
++#ifdef __cplusplus
++}
++#endif
+diff -ruN a/src/ggml-metal/ggml-metal-pfa.m b/src/ggml-metal/ggml-metal-pfa.m
+--- a/src/ggml-metal/ggml-metal-pfa.m	1970-01-01 02:00:00
++++ b/src/ggml-metal/ggml-metal-pfa.m	2026-10-27 04:43:05
+@@ -0,0 +1,610 @@
++// SLLM patch 7 (phase 2 prefillattn): dispatch, self-test and status of the GQA-packed prefill attention ("pfa",
++// kernels/prefill.metal).
++//
++// Mode (env SLLM_PREFILL_CASCADE, read once at device init):
++//   unset or "1"  auto: pfa takes a hinted FLASH_ATTN_EXT that ggml itself would run on its tensor-API kernel
++//                 (kernel_flash_attn_ext_tensor: >= 20 rows, ceil(rows / 32) * heads * head size >= 8192, dense) when
++//                 the self-test passed. Its output is then bitwise ggml's (same per-row arithmetic), only faster.
++//   "0"           off: every FLASH_ATTN_EXT goes through the official ggml path (A/B switch)
++//   "force"       test only: any number of query rows (below ggml's tensor-path floor the result is no longer ggml's
++//                 bits, since ggml would take its vector or half8x8 kernels there)
++// SLLM_CASCADE_TRACE=1 also prints every pfa dispatch, and why a hinted op was not taken, to stderr (tests only).
++//
++// Conditions (else ggml's own kernels): the hint (op_params[13] = GGML_METAL_SLLM_PFA_MAGIC); the Metal 4 tensor API;
++// q f32 with 16-byte token / head strides, K/V f16 with contiguous head rows, head size 128 or 256 (K and V equal),
++// G = H / HKV in {2, 4}, one stream (ne03 = 1), a view of a multiple of 64 cells, dense (no n_kv_max); an f16 mask as
++// wide as the view, covering every row, one for all heads; no sinks, no ALiBi, no logit softcap; dst contiguous f32.
++//
++// Tile (sllm/results/phase2-prefillattn, standalone sweep): 32 rows (32/G tokens x G heads) per threadgroup, 64 cells
++// per block, 4 simdgroups. ggml's blk pass (kernel_flash_attn_ext_blk) runs with nqptg = 32/G, ncpsg = 64.
++
++#import "ggml-metal-pfa.h"
++
++#import "ggml-impl.h"
++#import "ggml-metal-impl.h"
++
++#import <Foundation/Foundation.h>
++#import <Metal/Metal.h>
++
++#include <math.h>
++#include <stdatomic.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#define SLLM_PFA_RT        32  // rows per threadgroup
++#define SLLM_PFA_C         64  // cells per block
++#define SLLM_PFA_NSG       4   // simdgroups
++#define SLLM_PFA_MIN_WORK   8192  // ggml's tensor-path floor (ggml-metal-ops.cpp b11669): ceil(rows/32)*heads*D
++#define SLLM_PFA_MIN_ROWS   20    // ggml's vector-kernel bound: fewer rows take kernel_flash_attn_ext_vec
++
++enum sllm_pfa_mode { SLLM_PFA_MODE_AUTO = 0, SLLM_PFA_MODE_OFF = 1, SLLM_PFA_MODE_FORCE = 2 };
++
++static struct {
++    bool initialized;
++    bool active;
++    bool trace;
++    enum sllm_pfa_mode mode;
++    char reason[256];
++    bool compile_failed;
++    char compile_msg[256];
++    bool selftest_ran;
++    bool selftest_pass;
++    int  selftest_cases;
++    bool selftest_repeat_bitwise;
++    bool selftest_ggml_bitwise;
++    double selftest_worst_max_rel;
++    double selftest_worst_rel_rms;
++    double selftest_ms;
++    atomic_ullong dispatches;
++} g_pfa;
++
++void ggml_metal_sllm_pfa_note_compile_failure(const char * msg) {
++    g_pfa.compile_failed = true;
++    snprintf(g_pfa.compile_msg, sizeof(g_pfa.compile_msg), "%s", msg ? msg : "unknown");
++}
++
++static size_t sllm_pfa_align(size_t x) { return (x + 255) & ~(size_t) 255; }
++
++static void sllm_pfa_fill_plan(struct ggml_metal_sllm_pfa_plan * p, int D, int N, int H, int HKV, int ne11, int ne30, int ne31,
++        uint64_t nb01, uint64_t nb02, uint64_t nb11, uint64_t nb12, uint64_t nb21, uint64_t nb22, uint64_t nb31, uint64_t nb1, float scale) {
++    const int G = H/HKV;
++    const int TT = SLLM_PFA_RT/G;
++    const int ntile = (N + TT - 1)/TT;
++    const int blk_ld = (ne30 + SLLM_PFA_C - 1)/SLLM_PFA_C;
++
++    p->D = D; p->G = G; p->rt = SLLM_PFA_RT; p->c = SLLM_PFA_C; p->ne30 = ne30; p->ne31 = ne31;
++    size_t off = 0;
++    p->off_blk = off; off += sllm_pfa_align((size_t) ntile*blk_ld);
++    p->off_qh  = off; off += sllm_pfa_align((size_t) HKV*ntile*SLLM_PFA_RT*D*2);
++    p->extra   = off;
++
++    ggml_metal_kargs_sllm_pfa * a = &p->args;
++    memset(a, 0, sizeof(*a));
++    a->ne01 = N; a->H = H; a->HKV = HKV; a->ne11 = ne11; a->nblk0 = ne11/SLLM_PFA_C; a->blk_ld = blk_ld; a->ntile = ntile;
++    a->nb01 = nb01; a->nb02 = nb02; a->nb11 = nb11; a->nb12 = nb12; a->nb21 = nb21; a->nb22 = nb22; a->nb31 = nb31; a->nb1 = nb1;
++    a->scale = scale;
++}
++
++static bool sllm_pfa_reject(const struct ggml_tensor * op, int cond) {
++    if (g_pfa.trace) {
++        fprintf(stderr, "sllm_pfa: hinted op %s not taken (condition %d)\n", op->name, cond);
++    }
++    return false;
++}
++
++bool ggml_metal_sllm_pfa_plan_op(const struct ggml_tensor * op, struct ggml_metal_sllm_pfa_plan * plan) {
++    if (!g_pfa.active || op->op != GGML_OP_FLASH_ATTN_EXT) {
++        return false;
++    }
++    if (ggml_get_op_params_i32(op, 13) != GGML_METAL_SLLM_PFA_MAGIC) {
++        return false;
++    }
++    const struct ggml_tensor * q = op->src[0];
++    const struct ggml_tensor * k = op->src[1];
++    const struct ggml_tensor * v = op->src[2];
++    const struct ggml_tensor * m = op->src[3];
++    if (!q || !k || !v || !m || op->src[4] || op->src[5] || op->src[6]) {
++        return sllm_pfa_reject(op, 1);
++    }
++    float scale, max_bias, softcap;
++    memcpy(&scale,    (const int32_t *) op->op_params + 0, sizeof(float));
++    memcpy(&max_bias, (const int32_t *) op->op_params + 1, sizeof(float));
++    memcpy(&softcap,  (const int32_t *) op->op_params + 2, sizeof(float));
++    if (max_bias != 0.0f || softcap != 0.0f) {
++        return sllm_pfa_reject(op, 2);
++    }
++    if (q->type != GGML_TYPE_F32 || k->type != GGML_TYPE_F16 || v->type != GGML_TYPE_F16 || m->type != GGML_TYPE_F16 || op->type != GGML_TYPE_F32) {
++        return sllm_pfa_reject(op, 3);
++    }
++    const int64_t D = q->ne[0], N = q->ne[1], H = q->ne[2];
++    const int64_t ne11 = k->ne[1], HKV = k->ne[2];
++    if ((D != 128 && D != 256) || k->ne[0] != D || v->ne[0] != D || v->ne[1] != ne11 || v->ne[2] != HKV) {
++        return sllm_pfa_reject(op, 4);
++    }
++    if (q->ne[3] != 1 || k->ne[3] != 1 || v->ne[3] != 1 || HKV <= 0 || H % HKV != 0 || (H/HKV != 2 && H/HKV != 4)) {
++        return sllm_pfa_reject(op, 5);
++    }
++    // auto: only ops ggml itself runs on kernel_flash_attn_ext_tensor, where pfa reproduces its bits
++    if (N < 1 || N >= 65536 || (g_pfa.mode != SLLM_PFA_MODE_FORCE && (N < SLLM_PFA_MIN_ROWS || ((N + 31)/32)*H*D < SLLM_PFA_MIN_WORK))) {
++        return sllm_pfa_reject(op, 6);
++    }
++    if (ggml_get_op_params_i32(op, 4) > 0) {
++        return sllm_pfa_reject(op, 12); // n_kv_max: ggml's sparse path
++    }
++    if (ne11 <= 0 || ne11 % SLLM_PFA_C != 0 || ne11 > (1 << 24)) {
++        return sllm_pfa_reject(op, 7);
++    }
++    // strides: q rows of f32 (float4 loads), K/V head rows of contiguous halfs (matmul2d device operands)
++    if (q->nb[0] != sizeof(float) || q->nb[1] % 16 != 0 || q->nb[2] % 16 != 0) {
++        return sllm_pfa_reject(op, 8);
++    }
++    if (k->nb[0] != 2 || v->nb[0] != 2 || k->nb[1] % 16 != 0 || k->nb[2] % 16 != 0 || v->nb[1] % 16 != 0 || v->nb[2] % 16 != 0 ||
++        k->nb[1]/2 > INT32_MAX || v->nb[1]/2 > INT32_MAX) {
++        return sllm_pfa_reject(op, 9);
++    }
++    if (m->ne[0] != ne11 || m->ne[1] < N || m->ne[2] != 1 || m->ne[3] != 1 || m->nb[0] != 2 || m->nb[1] % 2 != 0 || m->ne[0] > (1 << 24)) {
++        return sllm_pfa_reject(op, 10);
++    }
++    if (op->ne[0] != D || op->ne[1] != H || op->ne[2] != N || op->ne[3] != 1 || !ggml_is_contiguous(op)) {
++        return sllm_pfa_reject(op, 11);
++    }
++    if (plan) {
++        sllm_pfa_fill_plan(plan, (int) D, (int) N, (int) H, (int) HKV, (int) ne11, (int) m->ne[0], (int) m->ne[1],
++                q->nb[1], q->nb[2], k->nb[1], k->nb[2], v->nb[1], v->nb[2], m->nb[1], op->nb[2], scale);
++    }
++    return true;
++}
++
++size_t ggml_metal_sllm_pfa_extra(const struct ggml_tensor * op) {
++    struct ggml_metal_sllm_pfa_plan p;
++    if (!ggml_metal_sllm_pfa_plan_op(op, &p)) {
++        return 0;
++    }
++    return p.extra;
++}
++
++static struct ggml_metal_pipeline_with_params sllm_pfa_get_pipeline(ggml_metal_library_t lib, const char * base) {
++    struct ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, base);
++    if (!res.pipeline) {
++        res = ggml_metal_library_compile_pipeline(lib, base, base, NULL);
++    }
++    return res;
++}
++
++static struct ggml_metal_buffer_id sllm_pfa_at(struct ggml_metal_buffer_id b, size_t off) {
++    b.offs += off;
++    return b;
++}
++
++bool ggml_metal_sllm_pfa_encode(ggml_metal_library_t lib, ggml_metal_encoder_t enc, const struct ggml_metal_sllm_pfa_plan * plan,
++        struct ggml_metal_buffer_id q, struct ggml_metal_buffer_id k, struct ggml_metal_buffer_id v,
++        struct ggml_metal_buffer_id mask, struct ggml_metal_buffer_id dst) {
++    const ggml_metal_kargs_sllm_pfa * a = &plan->args;
++    if (q.offs % 16 != 0 || k.offs % 16 != 0 || v.offs % 16 != 0 || mask.offs % 2 != 0 || dst.offs % 16 != 0) {
++        if (g_pfa.trace) {
++            fprintf(stderr, "sllm_pfa: misaligned buffers (q %zu, k %zu, v %zu, mask %zu, dst %zu)\n",
++                    (size_t) q.offs, (size_t) k.offs, (size_t) v.offs, (size_t) mask.offs, (size_t) dst.offs);
++        }
++        return false;
++    }
++    const int TT = plan->rt/plan->G;
++
++    // ggml's own blk pipeline (fa_aux.metal); the getter only names and compiles it, it reads nothing from the tensor
++    struct ggml_tensor dummy;
++    memset(&dummy, 0, sizeof(dummy));
++    dummy.op = GGML_OP_FLASH_ATTN_EXT;
++    struct ggml_metal_pipeline_with_params p_blk = ggml_metal_library_get_pipeline_flash_attn_ext_blk(lib, &dummy, TT, plan->c);
++
++    char name[96];
++    snprintf(name, sizeof(name), "kernel_sllm_pfa_q_d%d_rt%d_g%d", plan->D, plan->rt, plan->G);
++    struct ggml_metal_pipeline_with_params p_q = sllm_pfa_get_pipeline(lib, name);
++    snprintf(name, sizeof(name), "kernel_sllm_pfa_d%d_rt%d_c%d_sg%d_g%d", plan->D, plan->rt, plan->c, SLLM_PFA_NSG, plan->G);
++    struct ggml_metal_pipeline_with_params p_pf = sllm_pfa_get_pipeline(lib, name);
++    if (!p_blk.pipeline || !p_q.pipeline || !p_pf.pipeline || ggml_metal_pipeline_max_theads_per_threadgroup(p_pf) < SLLM_PFA_NSG*32 ||
++        ggml_metal_pipeline_max_theads_per_threadgroup(p_q) < 256) {
++        return false;
++    }
++    const size_t smem = ((size_t) plan->rt*plan->c*(4 + 2) + (size_t) plan->rt*4 + 15)/16*16;
++
++    const size_t base = (size_t) plan->D*a->H*a->ne01*sizeof(float); // ggml_nbytes(dst)
++    const struct ggml_metal_buffer_id b_blk = sllm_pfa_at(dst, base + plan->off_blk);
++    const struct ggml_metal_buffer_id b_qh  = sllm_pfa_at(dst, base + plan->off_qh);
++
++    ggml_metal_kargs_sllm_pfa args = *a;
++
++    // 1. block classes (ggml's blk kernel over the whole mask width, one row tile = 32/G tokens) and half Q
++    ggml_metal_kargs_flash_attn_ext_blk args0 = {
++        /*.ne01 =*/ a->ne01,
++        /*.ne30 =*/ plan->ne30,
++        /*.ne31 =*/ plan->ne31,
++        /*.ne32 =*/ 1,
++        /*.ne33 =*/ 1,
++        /*.nb31 =*/ a->nb31,
++        /*.nb32 =*/ a->nb31*(uint64_t) plan->ne31,
++        /*.nb33 =*/ a->nb31*(uint64_t) plan->ne31,
++    };
++    ggml_metal_encoder_set_pipeline(enc, p_blk);
++    ggml_metal_encoder_set_bytes   (enc, &args0, sizeof(args0), 0);
++    ggml_metal_encoder_set_buffer  (enc, mask,  1);
++    ggml_metal_encoder_set_buffer  (enc, b_blk, 2);
++    ggml_metal_encoder_dispatch_threadgroups(enc, a->blk_ld, a->ntile, 1, 32, 1, 1);
++
++    const int qx = plan->D/4, qy = 256/qx;
++    ggml_metal_encoder_set_pipeline(enc, p_q);
++    ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
++    ggml_metal_encoder_set_buffer  (enc, q,    1);
++    ggml_metal_encoder_set_buffer  (enc, b_qh, 2);
++    ggml_metal_encoder_dispatch_threadgroups(enc, 1, (a->ntile*plan->rt + qy - 1)/qy, a->HKV, qx, qy, 1);
++
++    ggml_metal_encoder_memory_barrier(enc);
++
++    // 2. attention: one threadgroup per (KV head, row tile)
++    ggml_metal_encoder_set_pipeline(enc, p_pf);
++    ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
++    ggml_metal_encoder_set_buffer  (enc, b_qh,  1);
++    ggml_metal_encoder_set_buffer  (enc, k,     2);
++    ggml_metal_encoder_set_buffer  (enc, v,     3);
++    ggml_metal_encoder_set_buffer  (enc, mask,  4);
++    ggml_metal_encoder_set_buffer  (enc, b_blk, 5);
++    ggml_metal_encoder_set_buffer  (enc, dst,   6);
++    ggml_metal_encoder_set_threadgroup_memory_size(enc, smem, 0);
++    ggml_metal_encoder_dispatch_threadgroups(enc, a->HKV, a->ntile, 1, SLLM_PFA_NSG*32, 1, 1);
++
++    atomic_fetch_add(&g_pfa.dispatches, 1);
++    if (g_pfa.trace) {
++        fprintf(stderr, "sllm_pfa: D=%d T=%d H=%d HKV=%d cells=%d mask=%dx%d tiles=%d\n",
++                plan->D, a->ne01, a->H, a->HKV, a->ne11, plan->ne30, plan->ne31, a->ntile);
++    }
++    return true;
++}
++
++//
++// self-test: both head sizes, G = 2 and 4, partial row tiles, a shared prefix visible to every token, another
++// agent's hidden cells inside the view, own cells (committed + causal chunk), window layers that hide whole prefix
++// blocks; every output bitwise equal to ggml's own blk + kernel_flash_attn_ext_tensor on the same inputs, and to a
++// second pfa run; against an exact double softmax over the finite mask entries on sampled tokens (every head and
++// dimension); every output finite
++//
++
++static uint64_t sllm_pfa_rng(uint64_t * s) {
++    *s ^= *s << 13; *s ^= *s >> 7; *s ^= *s << 17;
++    return *s;
++}
++static float sllm_pfa_rngf(uint64_t * s) { // uniform in [-1, 1)
++    return (float) (sllm_pfa_rng(s) >> 40) / (float) (1ull << 23) - 1.0f;
++}
++
++struct sllm_pfa_case {
++    int D, H, HKV, T;   // head size, heads, KV heads, tokens of the chunk
++    int P, other, U;    // view: [0, P) shared prefix, then `other` hidden cells, then U committed own cells + the chunk
++    int window;         // > 0: hide cells more than `window` positions behind the token (Gemma window layers)
++    int extra;          // mask columns beyond the view
++};
++
++static bool sllm_pfa_sampled(int t, int T) {
++    return t < 4 || t >= T - 4 || t % 17 == 0;
++}
++
++// ggml's own tensor-API path on the same inputs (what ggml_metal_op_flash_attn_ext encodes for such an op): blk with
++// 32-row tiles, then kernel_flash_attn_ext_tensor_f16_dk<D>_dv<D> with a mask, no sinks, bias or softcap
++static bool sllm_pfa_encode_ggml(ggml_metal_library_t lib, ggml_metal_encoder_t enc, const struct ggml_metal_sllm_pfa_plan * plan,
++        struct ggml_metal_buffer_id q, struct ggml_metal_buffer_id k, struct ggml_metal_buffer_id v,
++        struct ggml_metal_buffer_id mask, struct ggml_metal_buffer_id blk, struct ggml_metal_buffer_id dst) {
++    const ggml_metal_kargs_sllm_pfa * a = &plan->args;
++    const int Q = OP_FLASH_ATTN_EXT_TENSOR_NQPSG, C = OP_FLASH_ATTN_EXT_TENSOR_NCPSG, NSG = OP_FLASH_ATTN_EXT_TENSOR_NSG;
++    struct ggml_tensor top, tk, tv;
++    memset(&top, 0, sizeof(top)); memset(&tk, 0, sizeof(tk)); memset(&tv, 0, sizeof(tv));
++    top.op = GGML_OP_FLASH_ATTN_EXT;
++    tk.type = GGML_TYPE_F16; tk.ne[0] = plan->D;
++    tv.type = GGML_TYPE_F16; tv.ne[0] = plan->D;
++    top.src[1] = &tk; top.src[2] = &tv;
++    struct ggml_metal_pipeline_with_params p_blk = ggml_metal_library_get_pipeline_flash_attn_ext_blk(lib, &top, Q, C);
++    struct ggml_metal_pipeline_with_params p_fa  = ggml_metal_library_get_pipeline_flash_attn_ext_tensor(lib, &top, true, false, false, false);
++    if (!p_blk.pipeline || !p_fa.pipeline || ggml_metal_pipeline_max_theads_per_threadgroup(p_fa) < 32*NSG) {
++        return false;
++    }
++    ggml_metal_kargs_flash_attn_ext_blk args0 = {
++        /*.ne01 =*/ a->ne01, /*.ne30 =*/ plan->ne30, /*.ne31 =*/ plan->ne31, /*.ne32 =*/ 1, /*.ne33 =*/ 1,
++        /*.nb31 =*/ a->nb31, /*.nb32 =*/ a->nb31*(uint64_t) plan->ne31, /*.nb33 =*/ a->nb31*(uint64_t) plan->ne31,
++    };
++    ggml_metal_encoder_set_pipeline(enc, p_blk);
++    ggml_metal_encoder_set_bytes   (enc, &args0, sizeof(args0), 0);
++    ggml_metal_encoder_set_buffer  (enc, mask, 1);
++    ggml_metal_encoder_set_buffer  (enc, blk,  2);
++    ggml_metal_encoder_dispatch_threadgroups(enc, (plan->ne30 + C - 1)/C, (a->ne01 + Q - 1)/Q, 1, 32, 1, 1);
++    ggml_metal_encoder_memory_barrier(enc);
++
++    const int32_t n_head_log2 = 1u << (uint32_t) floorf(log2f((float) a->H));
++    ggml_metal_kargs_flash_attn_ext args = {
++        /*.ne01          =*/ a->ne01,
++        /*.ne02          =*/ a->H,
++        /*.ne03          =*/ 1,
++        /*.nb01          =*/ a->nb01,
++        /*.nb02          =*/ a->nb02,
++        /*.nb03          =*/ a->nb02*(uint64_t) a->H*(uint64_t) a->ne01,
++        /*.ne11          =*/ a->ne11,
++        /*.ne_12_2       =*/ a->HKV,
++        /*.ne_12_3       =*/ 1,
++        /*.ns10          =*/ (int32_t) (a->nb11/2),
++        /*.nb11          =*/ a->nb11,
++        /*.nb12          =*/ a->nb12,
++        /*.nb13          =*/ a->nb11*(uint64_t) a->ne11,
++        /*.ns20          =*/ (int32_t) (a->nb21/2),
++        /*.nb21          =*/ a->nb21,
++        /*.nb22          =*/ a->nb22,
++        /*.nb23          =*/ a->nb21*(uint64_t) a->ne11,
++        /*.ne31          =*/ plan->ne31,
++        /*.ne32          =*/ 1,
++        /*.ne33          =*/ 1,
++        /*.nb31          =*/ a->nb31,
++        /*.nb32          =*/ a->nb31*(uint64_t) plan->ne31,
++        /*.nb33          =*/ a->nb31*(uint64_t) plan->ne31,
++        /*.ne1           =*/ a->H,
++        /*.ne2           =*/ a->ne01,
++        /*.ne3           =*/ 1,
++        /*.scale         =*/ a->scale,
++        /*.max_bias      =*/ 0.0f,
++        /*.m0            =*/ 1.0f,
++        /*.m1            =*/ 1.0f,
++        /*.n_head_log2   =*/ n_head_log2,
++        /*.logit_softcap =*/ 0.0f,
++    };
++    const size_t smem = ((size_t) Q*plan->D*2 + (size_t) Q*C*(4 + 2) + (size_t) Q*4 + 4 + 15)/16*16;
++    ggml_metal_encoder_set_pipeline(enc, p_fa);
++    ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
++    ggml_metal_encoder_set_buffer  (enc, q,    1);
++    ggml_metal_encoder_set_buffer  (enc, k,    2);
++    ggml_metal_encoder_set_buffer  (enc, v,    3);
++    ggml_metal_encoder_set_buffer  (enc, mask, 4);
++    ggml_metal_encoder_set_buffer  (enc, q,    5);
++    ggml_metal_encoder_set_buffer  (enc, blk,  6);
++    ggml_metal_encoder_set_buffer  (enc, dst,  7);
++    ggml_metal_encoder_set_threadgroup_memory_size(enc, smem, 0);
++    ggml_metal_encoder_dispatch_threadgroups(enc, (a->ne01 + Q - 1)/Q, a->H, 1, 32, NSG, 1);
++    return true;
++}
++
++static bool sllm_pfa_selftest(ggml_metal_device_t dev, ggml_metal_library_t lib, char * why, size_t why_n) {
++    const struct sllm_pfa_case cases[4] = {
++        { 128, 16, 8, 200, 512, 256, 100,   0, 0 },
++        { 256,  8, 4, 129, 256,   0,  64, 300, 0 },
++        { 128,  8, 2, 300, 256, 256,   0,   0, 0 },
++        { 256, 16, 4,  40, 128,  64,  30, 100, 0 },
++    };
++    id<MTLDevice> device = (id<MTLDevice>) ggml_metal_device_get_obj(dev);
++    if (!device) {
++        snprintf(why, why_n, "no MTLDevice");
++        return false;
++    }
++    bool ok = true;
++    const int64_t t0 = ggml_time_us();
++    double worst_max = 0.0, worst_rms = 0.0;
++    int n_cases = 0;
++    bool bitwise = true, ggml_bitwise = true;
++
++    @autoreleasepool {
++        id<MTLCommandQueue> queue = [device newCommandQueue];
++        if (!queue) {
++            snprintf(why, why_n, "newCommandQueue failed");
++            return false;
++        }
++        for (int ci = 0; ci < 4 && ok; ++ci) {
++            const struct sllm_pfa_case c = cases[ci];
++            const int G = c.H/c.HKV;
++            const int own0 = c.P + c.other;                       // first own cell
++            const int ne11 = (own0 + c.U + c.T + SLLM_PFA_C - 1)/SLLM_PFA_C*SLLM_PFA_C;
++            const int ne30 = ne11 + c.extra;
++            const size_t rowk = (size_t) c.HKV*c.D;  // halfs per cell
++            struct ggml_metal_sllm_pfa_plan plan;
++            sllm_pfa_fill_plan(&plan, c.D, c.T, c.H, c.HKV, ne11, ne30, c.T, (uint64_t) c.H*c.D*4, (uint64_t) c.D*4,
++                    rowk*2, (uint64_t) c.D*2, rowk*2, (uint64_t) c.D*2, (uint64_t) ne30*2, (uint64_t) c.H*c.D*4, 1.0f/sqrtf((float) c.D));
++            const size_t dst_bytes = (size_t) c.D*c.H*c.T*4;
++            id<MTLBuffer> bq  = [device newBufferWithLength:(size_t) c.T*c.H*c.D*4 options:MTLResourceStorageModeShared];
++            id<MTLBuffer> bk  = [device newBufferWithLength:(size_t) ne11*rowk*2 options:MTLResourceStorageModeShared];
++            id<MTLBuffer> bv  = [device newBufferWithLength:(size_t) ne11*rowk*2 options:MTLResourceStorageModeShared];
++            id<MTLBuffer> bm  = [device newBufferWithLength:(size_t) c.T*ne30*2 options:MTLResourceStorageModeShared];
++            id<MTLBuffer> bd  = [device newBufferWithLength:dst_bytes + plan.extra options:MTLResourceStorageModeShared];
++            id<MTLBuffer> bd2 = [device newBufferWithLength:dst_bytes + plan.extra options:MTLResourceStorageModeShared];
++            id<MTLBuffer> bdg = [device newBufferWithLength:dst_bytes options:MTLResourceStorageModeShared];
++            id<MTLBuffer> bbg = [device newBufferWithLength:(size_t) ((c.T + 31)/32)*((ne30 + 63)/64) + 64 options:MTLResourceStorageModeShared];
++            if (!bq || !bk || !bv || !bm || !bd || !bd2 || !bdg || !bbg) {
++                snprintf(why, why_n, "buffer allocation failed");
++                ok = false;
++            }
++            if (ok) {
++                uint64_t seed = 0x9FA11ED0ull + 7919*ci;
++                float * q = (float *) [bq contents];
++                __fp16 * k = (__fp16 *) [bk contents];
++                __fp16 * v = (__fp16 *) [bv contents];
++                __fp16 * m = (__fp16 *) [bm contents];
++                float * d = (float *) [bd contents];
++                float * d2 = (float *) [bd2 contents];
++                float * dg = (float *) [bdg contents];
++                for (size_t i = 0; i < (size_t) c.T*c.H*c.D; ++i) q[i] = 3.0f*sllm_pfa_rngf(&seed);
++                for (size_t i = 0; i < (size_t) ne11*rowk; ++i) { k[i] = (__fp16) sllm_pfa_rngf(&seed); v[i] = (__fp16) sllm_pfa_rngf(&seed); }
++                for (size_t i = 0; i < dst_bytes/4; ++i) { d[i] = NAN; d2[i] = NAN; dg[i] = NAN; }
++                for (int t = 0; t < c.T; ++t) {
++                    __fp16 * row = m + (size_t) t*ne30;
++                    const int qpos = c.P + c.U + t;                       // the token's position
++                    for (int j = 0; j < ne30; ++j) row[j] = (__fp16) -INFINITY;
++                    for (int j = ne11; j < ne30; ++j) row[j] = 0;         // beyond the view: finite, must be ignored
++                    for (int j = 0; j < c.P; ++j) {                       // the shared prefix: positions 0 .. P - 1
++                        if (c.window <= 0 || qpos - j < c.window) row[j] = 0;
++                    }
++                    for (int i = 0; i <= c.U + t; ++i) {                  // own cells: positions P .. qpos
++                        const int pos = c.P + i;
++                        if (c.window <= 0 || qpos - pos < c.window) row[own0 + i] = 0;
++                    }
++                }
++
++                id<MTLCommandBuffer> cb = [queue commandBuffer];
++                ggml_metal_encoder_t enc = ggml_metal_encoder_init((ggml_metal_cmd_buf_t) cb, false);
++                const struct ggml_metal_buffer_id iq = { (void *) bq, 0 }, ik = { (void *) bk, 0 }, iv = { (void *) bv, 0 },
++                                                  im = { (void *) bm, 0 }, idd = { (void *) bd, 0 }, idd2 = { (void *) bd2, 0 },
++                                                  idg = { (void *) bdg, 0 }, ibg = { (void *) bbg, 0 };
++                bool enc_ok = ggml_metal_sllm_pfa_encode(lib, enc, &plan, iq, ik, iv, im, idd);
++                if (enc_ok) {
++                    ggml_metal_encoder_memory_barrier(enc);
++                    enc_ok = ggml_metal_sllm_pfa_encode(lib, enc, &plan, iq, ik, iv, im, idd2);
++                }
++                if (enc_ok) {
++                    ggml_metal_encoder_memory_barrier(enc);
++                    enc_ok = sllm_pfa_encode_ggml(lib, enc, &plan, iq, ik, iv, im, ibg, idg);
++                }
++                ggml_metal_encoder_end_encoding(enc);
++                ggml_metal_encoder_free(enc);
++                if (!enc_ok) {
++                    snprintf(why, why_n, "pipelines for D=%d G=%d not available", c.D, G);
++                    ok = false;
++                } else {
++                    [cb commit];
++                    [cb waitUntilCompleted];
++                    if ([cb status] != MTLCommandBufferStatusCompleted) {
++                        snprintf(why, why_n, "command buffer failed: %s", [[[cb error] description] UTF8String]);
++                        ok = false;
++                    }
++                }
++                if (ok) {
++                    bool finite = true;
++                    for (size_t i = 0; i < dst_bytes/4; ++i) {
++                        if (!isfinite(d[i])) { finite = false; break; }
++                    }
++                    if (memcmp(d, d2, dst_bytes) != 0) {
++                        bitwise = false;
++                    }
++                    if (memcmp(d, dg, dst_bytes) != 0) {
++                        ggml_bitwise = false;
++                    }
++                    double * sc = (double *) malloc((size_t) ne11*sizeof(double));
++                    double se = 0.0, sr = 0.0, maxerr = 0.0, maxref = 0.0;
++                    for (int t = 0; t < c.T; ++t) {
++                        if (!sllm_pfa_sampled(t, c.T)) continue;
++                        for (int h = 0; h < c.H; ++h) {
++                            const int hk = h/G;
++                            const float * qq = q + ((size_t) t*c.H + h)*c.D;
++                            double mx = -INFINITY;
++                            for (int j = 0; j < ne11; ++j) {
++                                const float mv = (float) m[(size_t) t*ne30 + j];
++                                if (!(mv > -65504.0f)) { sc[j] = -INFINITY; continue; }
++                                double acc = 0.0;
++                                for (int e = 0; e < c.D; ++e) acc += (double) qq[e]*(double) k[(size_t) j*rowk + (size_t) hk*c.D + e];
++                                sc[j] = acc/sqrt((double) c.D) + mv;
++                                if (sc[j] > mx) mx = sc[j];
++                            }
++                            double l = 0.0;
++                            for (int j = 0; j < ne11; ++j) { sc[j] = isinf(sc[j]) ? 0.0 : exp(sc[j] - mx); l += sc[j]; }
++                            for (int e = 0; e < c.D; ++e) {
++                                double acc = 0.0;
++                                for (int j = 0; j < ne11; ++j) if (sc[j] != 0.0) acc += sc[j]*(double) v[(size_t) j*rowk + (size_t) hk*c.D + e];
++                                const double ref = acc/l;
++                                const double got = d[((size_t) t*c.H + h)*c.D + e];
++                                const double err = fabs(got - ref);
++                                se += err*err; sr += ref*ref;
++                                if (err > maxerr) maxerr = err;
++                                if (fabs(ref) > maxref) maxref = fabs(ref);
++                            }
++                        }
++                    }
++                    free(sc);
++                    const double rel_rms = sr > 0 ? sqrt(se/sr) : 1.0;
++                    const double max_rel = maxref > 0 ? maxerr/maxref : 1.0;
++                    if (max_rel > worst_max) worst_max = max_rel;
++                    if (rel_rms > worst_rms) worst_rms = rel_rms;
++                    ++n_cases;
++                    if (!finite || !bitwise || !ggml_bitwise || !(max_rel < 5e-3) || !(rel_rms < 2e-3)) {
++                        snprintf(why, why_n, "mismatch D=%d G=%d T=%d: max_abs/max_ref %.3g, rel_rms %.3g%s%s%s",
++                                 c.D, G, c.T, max_rel, rel_rms, finite ? "" : ", non-finite output", bitwise ? "" : ", repeat not bitwise equal",
++                                 ggml_bitwise ? "" : ", not bitwise equal to ggml's tensor kernel");
++                        ok = false;
++                    }
++                }
++            }
++            [bq release]; [bk release]; [bv release]; [bm release]; [bd release]; [bd2 release]; [bdg release]; [bbg release];
++        }
++        [queue release];
++    }
++
++    g_pfa.selftest_cases          = n_cases;
++    g_pfa.selftest_repeat_bitwise = bitwise;
++    g_pfa.selftest_ggml_bitwise   = ggml_bitwise;
++    g_pfa.selftest_worst_max_rel  = worst_max;
++    g_pfa.selftest_worst_rel_rms  = worst_rms;
++    g_pfa.selftest_ms             = (ggml_time_us() - t0)/1e3;
++    return ok;
++}
++
++void ggml_metal_sllm_pfa_device_init(ggml_metal_device_t dev, ggml_metal_library_t lib, bool has_tensor) {
++    if (g_pfa.initialized) {
++        return;
++    }
++    g_pfa.initialized = true;
++    g_pfa.active = false;
++    atomic_store(&g_pfa.dispatches, 0);
++
++    const char * tr  = getenv("SLLM_CASCADE_TRACE");
++    const char * env = getenv("SLLM_PREFILL_CASCADE");
++    if (env && strcmp(env, "0") == 0) {
++        g_pfa.mode = SLLM_PFA_MODE_OFF;
++    } else if (env && strcmp(env, "force") == 0) {
++        g_pfa.mode = SLLM_PFA_MODE_FORCE;
++    } else {
++        g_pfa.mode = SLLM_PFA_MODE_AUTO;
++    }
++
++    if (g_pfa.mode == SLLM_PFA_MODE_OFF) {
++        snprintf(g_pfa.reason, sizeof(g_pfa.reason), "disabled by SLLM_PREFILL_CASCADE=0");
++    } else if (!has_tensor) {
++        snprintf(g_pfa.reason, sizeof(g_pfa.reason), "no Metal 4 tensor API on this device");
++    } else if (!lib) {
++        snprintf(g_pfa.reason, sizeof(g_pfa.reason), "no Metal library");
++    } else if (g_pfa.compile_failed) {
++        snprintf(g_pfa.reason, sizeof(g_pfa.reason), "kernels/prefill.metal failed to compile: %s", g_pfa.compile_msg);
++    } else {
++        char why[200] = "";
++        g_pfa.selftest_ran  = true;
++        g_pfa.selftest_pass = sllm_pfa_selftest(dev, lib, why, sizeof(why));
++        if (g_pfa.selftest_pass) {
++            g_pfa.active = true;
++            snprintf(g_pfa.reason, sizeof(g_pfa.reason), "self-test passed");
++        } else {
++            snprintf(g_pfa.reason, sizeof(g_pfa.reason), "self-test failed: %s", why);
++        }
++        atomic_store(&g_pfa.dispatches, 0);
++    }
++    g_pfa.trace = tr && strcmp(tr, "1") == 0;
++
++    if (g_pfa.active) {
++        GGML_LOG_INFO("%s: SLLM prefill attention active (mode %s; self-test %d cases, worst max/ref %.2e, worst rel rms %.2e, %.1f ms)\n",
++                __func__, g_pfa.mode == SLLM_PFA_MODE_FORCE ? "force" : "auto", g_pfa.selftest_cases,
++                g_pfa.selftest_worst_max_rel, g_pfa.selftest_worst_rel_rms, g_pfa.selftest_ms);
++    } else if (g_pfa.mode == SLLM_PFA_MODE_OFF) {
++        GGML_LOG_INFO("%s: SLLM prefill attention off (%s)\n", __func__, g_pfa.reason);
++    } else {
++        GGML_LOG_WARN("%s: SLLM prefill attention disabled, using ggml for every prefill flash attention: %s\n", __func__, g_pfa.reason);
++    }
++}
++
++const char * ggml_backend_metal_sllm_prefill_status(void) {
++    static _Thread_local char buf[1024];
++    char reason[300];
++    size_t j = 0;
++    for (size_t i = 0; g_pfa.reason[i] && j + 2 < sizeof(reason); ++i) {
++        const char c = g_pfa.reason[i];
++        if (c == '"' || c == '\\') reason[j++] = '\\';
++        reason[j++] = (c == '\n' || c == '\r' || c == '\t') ? ' ' : c;
++    }
++    reason[j] = 0;
++    snprintf(buf, sizeof(buf),
++        "{\"patch\":\"sllm-prefill-1\",\"initialized\":%s,\"active\":%s,\"mode\":\"%s\",\"reason\":\"%s\","
++        "\"selftest\":{\"ran\":%s,\"pass\":%s,\"cases\":%d,\"repeat_bitwise\":%s,\"ggml_bitwise\":%s,\"worst_max_rel\":%.3e,\"worst_rel_rms\":%.3e,\"ms\":%.2f},"
++        "\"rule\":\"hinted FLASH_ATTN_EXT (op_params[13] = SLPF), f16 K/V, D in {128,256}, G in {2,4}, cells %% 64 == 0, dense, "
++        "ggml's tensor-path floor (T>=%d, ceil(T/32)*H*D>=%d): bitwise ggml's output\",\"dispatches\":%llu}",
++        g_pfa.initialized ? "true" : "false", g_pfa.active ? "true" : "false",
++        g_pfa.mode == SLLM_PFA_MODE_OFF ? "off" : g_pfa.mode == SLLM_PFA_MODE_FORCE ? "force" : "auto", reason,
++        g_pfa.selftest_ran ? "true" : "false", g_pfa.selftest_pass ? "true" : "false", g_pfa.selftest_cases,
++        g_pfa.selftest_repeat_bitwise ? "true" : "false", g_pfa.selftest_ggml_bitwise ? "true" : "false",
++        g_pfa.selftest_worst_max_rel, g_pfa.selftest_worst_rel_rms, g_pfa.selftest_ms,
++        SLLM_PFA_MIN_ROWS, SLLM_PFA_MIN_WORK, (unsigned long long) atomic_load(&g_pfa.dispatches));
++    return buf;
++}
+diff -ruN a/src/ggml-metal/ggml-metal.cpp b/src/ggml-metal/ggml-metal.cpp
+--- a/src/ggml-metal/ggml-metal.cpp	2026-10-27 04:25:41
++++ b/src/ggml-metal/ggml-metal.cpp	2026-10-27 04:29:22
+@@ -11,6 +11,7 @@
+ #include "ggml-metal-qmm.h"
+ #include "ggml-metal-cascade.h"
+ #include "ggml-metal-cascadeq.h"
++#include "ggml-metal-pfa.h"
+ 
+ #include <mutex>
+ #include <string>
+@@ -247,6 +248,8 @@
+                 res += ggml_metal_sllm_cascade_extra(tensor);
+                 // SLLM patch 6: scratch of the mixed-precision cascade
+                 res += ggml_metal_sllm_cascadeq_extra(tensor);
++                // SLLM patch 7: scratch of the prefill attention (block classes, half Q)
++                res += ggml_metal_sllm_pfa_extra(tensor);
+             } break;
+         case GGML_OP_CUMSUM:
+         case GGML_OP_ARGSORT:
+diff -ruN a/src/ggml-metal/kernels/prefill.metal b/src/ggml-metal/kernels/prefill.metal
+--- a/src/ggml-metal/kernels/prefill.metal	1970-01-01 02:00:00
++++ b/src/ggml-metal/kernels/prefill.metal	2026-10-27 04:42:14
+@@ -0,0 +1,233 @@
++// SLLM patch 7 (phase 2 prefillattn): GQA-packed prefill flash attention ("pfa") on the Metal 4 tensor API.
++//
++// Takes a GGML_OP_FLASH_ATTN_EXT of a prefill chunk that sllm-core hinted (op_params[13], see ggml-metal-pfa.h). The
++// inputs are the op's own: q f32 [D, ne01, H] (any token / head strides), K/V f16 views [D, ne11, HKV] (any cell /
++// head strides), the f16 mask [ne30 >= ne11, >= ne01] (0 visible, -inf hidden; added to the scaled scores), and
++// dst f32 [D, H, ne01]. Differences from ggml's kernel_flash_attn_ext_tensor (fa_tensor.metal):
++//   - one threadgroup covers RT rows = RT/G tokens x the G query heads of one KV head, so each K/V tile read from
++//     memory feeds G heads (ggml: 32 tokens of one head; every K/V tile is read once per query head);
++//   - Q is staged once per op as half (scaled) in a device scratch [HKV][row tiles][G][RT/G][D] (kernel_sllm_pfa_q);
++//   - the mask block classes come from ggml's own blk kernel
++//     (kernel_flash_attn_ext_blk, fa_aux.metal) run with nqptg = RT/G and ncpsg = C (0 hidden: skipped; 2 all zero:
++//     no mask read; 1 mixed: mask added).
++// The shared prefix needs no special pass: its blocks are class 2 for every token tile (dense, no mask reads), the
++// agent's own cells are class 1 near the diagonal, and other agents' pages in the view are class 0. One online softmax
++// runs over both ranges, which is the exact log-sum-exp merge of a prefix pass and a suffix pass done in registers.
++//
++// Per row it computes exactly what ggml's kernel computes (same rounding, same order), so its output is bitwise ggml's:
++// switching an op to it changes no token. From the standalone spike sllm/bench/phase2-prefillattn/pfa.metal (v3: the v1
++// tiling with ggml's per-row softmax). ggml-metal-pfa.m self-tests it at device init against ggml's own kernel
++// (bitwise) and a double-precision reference, and disables this path on a mismatch.
++
++#include "common.h"
++
++#if defined(GGML_METAL_HAS_TENSOR)
++
++using namespace mpp::tensor_ops;
++
++// same layout as ggml_metal_kargs_sllm_pfa in ggml-metal-pfa.h
++typedef struct {
++    int32_t ne01;    // tokens of the op
++    int32_t H;       // query heads
++    int32_t HKV;     // KV heads
++    int32_t ne11;    // cells of the K/V view (a multiple of C)
++    int32_t nblk0;   // C-cell blocks the kernel walks: ne11 / C
++    int32_t blk_ld;  // blk row stride: ceil(ne30 / C), ne30 the mask width
++    int32_t ntile;   // row tiles per KV head: ceil(ne01 / (RT/G))
++    int32_t pad0;
++    uint64_t nb01;   // q token stride (bytes)
++    uint64_t nb02;   // q head stride
++    uint64_t nb11;   // k cell stride
++    uint64_t nb12;   // k head stride
++    uint64_t nb21;   // v cell stride
++    uint64_t nb22;   // v head stride
++    uint64_t nb31;   // mask row stride
++    uint64_t nb1;    // dst token stride (bytes)
++    float scale;
++    int32_t pad1;
++} sllm_pfa_args;
++
++#define SLLM_PFA_NEG (-FLT_MAX/2)
++
++// Q f32 -> half * scale into qh [HKV][ntile][G][RT/G][D]; rows past ne01 are zero.
++template <int D, int RT, int G>
++kernel void kernel_sllm_pfa_q(
++        constant sllm_pfa_args & a [[buffer(0)]],
++        device const char * q  [[buffer(1)]],
++        device       half * qh [[buffer(2)]],
++        uint3 gid [[thread_position_in_grid]]) {
++    constexpr int TT = RT / G;
++    const int d4 = gid.x;                 // D/4 lanes
++    const int R  = gid.y;                 // row in [0, ntile*RT)
++    const int hk = gid.z;
++    if (d4 >= D / 4 || R >= a.ntile * RT) return;
++    const int tile = R / RT, rl = R % RT, g = rl / TT, tl = rl % TT;
++    const int t = tile * TT + tl;
++    float4 x = 0.0f;
++    if (t < a.ne01) {
++        x = ((device const float4 *) (q + (uint64_t) t * a.nb01 + (uint64_t) (hk * G + g) * a.nb02))[d4];
++    }
++    ((device half4 *) (qh + ((uint64_t) hk * a.ntile * RT + R) * D))[d4] = (half4) (x * a.scale);
++}
++
++// threadgroup memory: S [RT][C] float | P [RT][C] half | alpha [RT] float
++//
++// The per-row arithmetic is exactly that of ggml's kernel_flash_attn_ext_tensor (fa_tensor.metal, b11669), so every
++// row's result is bitwise the one ggml computes: Q K^T and P V on matmul2d with the same descriptors' inner sizes, one
++// simdgroup per row (rows j = jj*NSG + simdgroup), 2 cells per lane (lane, lane + 32), simd_max / simd_sum, the lazy
++// rescale (the running max moves only when it grows by more than 8), the mask added only on mixed blocks, O scaled by
++// 1/S at the end. Blocks hidden from a whole 32/G-token tile are skipped (ggml skips per 32-token tile and computes
++// exact zeros for the rest), so only the K/V traffic changes. The self-test checks the equality at device init.
++template <int D, int RT, int C, int NSG, int G>
++kernel void kernel_sllm_pfa(
++        constant sllm_pfa_args & a [[buffer(0)]],
++        device const half * qh   [[buffer(1)]],
++        device const char * k    [[buffer(2)]],
++        device const char * v    [[buffer(3)]],
++        device const char * mask [[buffer(4)]],
++        device const char * blk  [[buffer(5)]],
++        device       char * dst  [[buffer(6)]],
++        threadgroup  char * shm  [[threadgroup(0)]],
++        uint3  tg    [[threadgroup_position_in_grid]],
++        ushort tiisg [[thread_index_in_simdgroup]],
++        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
++    constexpr int NW = 32;
++    constexpr int NQ = RT / NSG;          // rows per simdgroup
++    constexpr int NC = C / NW;            // cells per lane
++    constexpr int TT = RT / G;            // tokens per tile
++    static_assert(RT % NSG == 0 && C % NW == 0 && RT % G == 0, "tile");
++
++    const int hk = tg.x, tile = tg.y;
++
++    threadgroup float * ss = (threadgroup float *) shm;
++    threadgroup half  * sp = (threadgroup half *) (ss + RT * C);
++    threadgroup float * sa = (threadgroup float *) (sp + RT * C);
++
++    constexpr auto dqk = matmul2d_descriptor(RT, C, D, false, true, false, matmul2d_descriptor::mode::multiply);
++    constexpr auto dpv = matmul2d_descriptor(RT, D, C, false, false, false, matmul2d_descriptor::mode::multiply_accumulate);
++    matmul2d<dqk, execution_simdgroups<NSG>> mqk;
++    matmul2d<dpv, execution_simdgroups<NSG>> mpv;
++
++    const int ldk = (int) (a.nb11 / 2), ldv = (int) (a.nb21 / 2);
++    device const half * kh = (device const half *) (k + (uint64_t) hk * a.nb12);
++    device const half * vh = (device const half *) (v + (uint64_t) hk * a.nb22);
++
++    auto tQ = tensor((device half *) qh + ((uint64_t) hk * a.ntile + tile) * RT * D, dextents<int32_t, 2>(D, RT), array<int, 2>({1, D}));
++    auto tS = tensor(ss, dextents<int32_t, 2>(C, RT), array<int, 2>({1, C}));
++    auto tP = tensor(sp, dextents<int32_t, 2>(C, RT), array<int, 2>({1, C}));
++    auto tK0 = tensor((device half *) kh, dextents<int32_t, 2>(D, C), array<int, 2>({1, ldk}));
++    auto tV0 = tensor((device half *) vh, dextents<int32_t, 2>(D, C), array<int, 2>({1, ldv}));
++    auto cS = mqk.template get_destination_cooperative_tensor<decltype(tQ), decltype(tK0), float>();
++    auto cO = mpv.template get_destination_cooperative_tensor<decltype(tP), decltype(tV0), float>();
++    #pragma unroll
++    for (uint16_t i = 0; i < cO.get_capacity(); ++i) {
++        if (cO.is_valid_element(i)) cO[i] = 0.0f;
++    }
++
++    device const half * pm[NQ];
++    bool rv[NQ];
++    float M[NQ], S[NQ];
++    #pragma unroll
++    for (int jj = 0; jj < NQ; ++jj) {
++        const int j = jj * NSG + sgitg;
++        const int t = tile * TT + j % TT;
++        rv[jj] = t < a.ne01;
++        pm[jj] = (device const half *) (mask + (uint64_t) (rv[jj] ? t : 0) * a.nb31);
++        M[jj] = SLLM_PFA_NEG;
++        S[jj] = 0.0f;
++    }
++    device const char * brow = blk + (uint64_t) tile * a.blk_ld;
++
++    for (int ib = 0; ib < a.nblk0; ++ib) {
++        const char bc = brow[ib];
++        if (bc == 0) continue;
++        const int cb = ib * C;
++
++        auto tK = tensor((device half *) kh + (uint64_t) cb * ldk, dextents<int32_t, 2>(D, C), array<int, 2>({1, ldk}));
++        mqk.run(tQ, tK, cS);
++        cS.store(tS);
++        threadgroup_barrier(mem_flags::mem_threadgroup);   // also: the previous block's P V is done with P
++
++        #pragma unroll
++        for (int jj = 0; jj < NQ; ++jj) {
++            const int j = jj * NSG + sgitg;
++            float s[NC];
++            #pragma unroll
++            for (int ii = 0; ii < NC; ++ii) s[ii] = ss[j * C + ii * NW + tiisg];
++            if (!rv[jj]) {
++                #pragma unroll
++                for (int ii = 0; ii < NC; ++ii) s[ii] = -INFINITY;
++            } else if (bc != 2) {
++                #pragma unroll
++                for (int ii = 0; ii < NC; ++ii) s[ii] += (float) pm[jj][cb + ii * NW + tiisg];
++            }
++            float m = M[jj];
++            #pragma unroll
++            for (int ii = 0; ii < NC; ++ii) m = max(m, s[ii]);
++            m = simd_max(m);
++            float ms = 1.0f;
++            if (m > M[jj] + 8.0f) {
++                ms = exp(M[jj] - m);
++                M[jj] = m;
++            }
++            float sum = 0.0f;
++            #pragma unroll
++            for (int ii = 0; ii < NC; ++ii) {
++                const half p = (half) exp(s[ii] - M[jj]);   // the sum uses the same rounded values as P V (as ggml)
++                sp[j * C + ii * NW + tiisg] = p;
++                sum += (float) p;
++            }
++            S[jj] = S[jj] * ms + simd_sum(sum);
++            if (tiisg == 0) sa[j] = ms;
++        }
++        threadgroup_barrier(mem_flags::mem_threadgroup);
++
++        // O = diag(ms) O + P V (ms is exactly 1 for rows that did not rescale)
++        #pragma unroll
++        for (uint16_t i = 0; i < cO.get_capacity(); ++i) {
++            if (cO.is_valid_element(i)) {
++                const auto ix = cO.get_multidimensional_index(i);
++                cO[i] *= sa[ix[1]];
++            }
++        }
++        auto tV = tensor((device half *) vh + (uint64_t) cb * ldv, dextents<int32_t, 2>(D, C), array<int, 2>({1, ldv}));
++        mpv.run(tP, tV, cO);
++    }
++
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++    #pragma unroll
++    for (int jj = 0; jj < NQ; ++jj) {
++        const int j = jj * NSG + sgitg;
++        if (tiisg == 0) sa[j] = S[jj] == 0.0f ? 0.0f : 1.0f / S[jj];
++    }
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++
++    // dst [D, H, ne01]: row (g, tl) of the tile -> token tile*TT + tl, head hk*G + g
++    #pragma unroll
++    for (uint16_t i = 0; i < cO.get_capacity(); ++i) {
++        if (cO.is_valid_element(i)) {
++            const auto ix = cO.get_multidimensional_index(i);
++            const int rr = ix[1], d = ix[0];
++            const int tt = tile * TT + rr % TT, g = rr / TT;
++            if (tt < a.ne01) {
++                ((device float *) (dst + (uint64_t) tt * a.nb1))[(hk * G + g) * D + d] = cO[i] * sa[rr];
++            }
++        }
++    }
++}
++
++#define SLLM_PFA(D, RT, C, NSG, G) \
++    template [[host_name("kernel_sllm_pfa_d" #D "_rt" #RT "_c" #C "_sg" #NSG "_g" #G)]] \
++    kernel void kernel_sllm_pfa<D, RT, C, NSG, G>(constant sllm_pfa_args &, device const half *, device const char *, \
++        device const char *, device const char *, device const char *, device char *, threadgroup char *, uint3, ushort, ushort);
++#define SLLM_PFAQ(D, RT, G) \
++    template [[host_name("kernel_sllm_pfa_q_d" #D "_rt" #RT "_g" #G)]] \
++    kernel void kernel_sllm_pfa_q<D, RT, G>(constant sllm_pfa_args &, device const char *, device half *, uint3);
++
++// the measured tile (RT 32 rows, C 64 cells, 4 simdgroups) for both head sizes and G = 2, 4
++SLLM_PFA(128, 32, 64, 4, 2) SLLM_PFA(128, 32, 64, 4, 4)
++SLLM_PFA(256, 32, 64, 4, 2) SLLM_PFA(256, 32, 64, 4, 4)
++SLLM_PFAQ(128, 32, 2) SLLM_PFAQ(128, 32, 4)
++SLLM_PFAQ(256, 32, 2) SLLM_PFAQ(256, 32, 4)
++
++#endif // GGML_METAL_HAS_TENSOR

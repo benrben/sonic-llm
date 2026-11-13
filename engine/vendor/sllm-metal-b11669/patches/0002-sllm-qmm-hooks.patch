@@ -1,0 +1,115 @@
+SLLM patch 2/2 (D042): the hooks: kernel source list, library kind, self-test call, dispatch branch, split-K scratch.
+Against llama.cpp b11669 (source tarball 620d222), applied with patch -p1 in ggml/.
+
+--- a/src/ggml-metal/CMakeLists.txt
++++ b/src/ggml-metal/CMakeLists.txt
+@@ -13,6 +13,7 @@
+                          ggml-metal-fusion.cpp
+                          ggml-metal-ops.cpp
+                          ggml-metal-tuning.cpp
++                         ggml-metal-qmm.m
+                         )
+ 
+ target_link_libraries(ggml-metal PRIVATE
+@@ -73,6 +74,7 @@
+     kernels/argsort.metal
+     kernels/pool.metal
+     kernels/misc.metal
++    kernels/qmm.metal
+ )
+ 
+ if (GGML_METAL_EMBED_LIBRARY)
+--- a/src/ggml-metal/ggml-metal-device.m
++++ b/src/ggml-metal/ggml-metal-device.m
+@@ -5,6 +5,7 @@
+ #import "ggml-backend-impl.h"
+ #import "ggml-metal-impl.h"
+ #import "ggml-metal-common.h"
++#import "ggml-metal-qmm.h"
+ 
+ #include <Foundation/Foundation.h>
+ 
+@@ -145,7 +146,8 @@
+     X(UPSCALE,         upscale)        \
+     X(ARGSORT,         argsort)        \
+     X(POOL,            pool)           \
+-    X(MISC,            misc)
++    X(MISC,            misc)           \
++    X(QMM,             qmm)
+ 
+ enum ggml_metal_lib_kind {
+ #define X(e, s) GGML_METAL_LIB_##e,
+@@ -364,6 +366,14 @@
+ 
+             t_per_lib[kind] = ggml_time_us() - t0;
+ 
++            if (!lib && kind == GGML_METAL_LIB_QMM) {
++                // SLLM patch: a qmm compile failure only disables the qmm path, never the library
++                ggml_metal_sllm_qmm_note_compile_failure(err_per_lib[kind] ? [[err_per_lib[kind] description] UTF8String] : "unknown");
++                [err_per_lib[kind] release];
++                err_per_lib[kind] = nil;
++                return;
++            }
++
+             if (!lib) {
+                 atomic_store(&any_failure, true);
+                 return;
+@@ -1313,6 +1323,9 @@
+                     GGML_LOG_ERROR("%s: error: failed to create library\n", __func__);
+                 }
+ 
++                // SLLM patch: read SLLM_QMM and self-test the qmm kernel against a CPU reference
++                ggml_metal_sllm_qmm_device_init(dev, dev->library, dev->props.has_tensor);
++
+                 if (dev->props.use_residency_sets) {
+                     dev->rsets = ggml_metal_rsets_init(dev);
+                 } else {
+--- a/src/ggml-metal/ggml-metal-ops.cpp
++++ b/src/ggml-metal/ggml-metal-ops.cpp
+@@ -8,6 +8,7 @@
+ #include "ggml-metal-common.h"
+ #include "ggml-metal-device.h"
+ #include "ggml-metal-fusion.h"
++#include "ggml-metal-qmm.h"
+ #include "ggml-metal-tuning.h"
+ 
+ #include <cassert>
+@@ -2598,6 +2599,16 @@
+         return ggml_metal_op_fwht(ctx, idx);
+     }
+ 
++    // SLLM patch: batched quantized matmul (kernels/qmm.metal) for the (type, N) cases where it beats ggml
++    {
++        ggml_metal_sllm_qmm_plan plan;
++        if (ggml_metal_sllm_qmm_plan_op(op, &plan) &&
++            ggml_metal_sllm_qmm_encode(lib, enc, &plan, ggml_metal_get_buffer_id(op->src[0]), ggml_metal_get_buffer_id(op->src[1]),
++                ggml_metal_get_buffer_id(op))) {
++            return 1;
++        }
++    }
++
+     if (props_dev->has_simdgroup_mm && ggml_metal_op_mul_mat_use_mma(op)) {
+         return ggml_metal_op_mul_mat_mma(ctx, idx);
+     }
+--- a/src/ggml-metal/ggml-metal.cpp
++++ b/src/ggml-metal/ggml-metal.cpp
+@@ -8,6 +8,7 @@
+ #include "ggml-metal-context.h"
+ #include "ggml-metal-ops.h"
+ #include "ggml-metal-tuning.h"
++#include "ggml-metal-qmm.h"
+ 
+ #include <mutex>
+ #include <string>
+@@ -222,6 +223,11 @@
+ 
+     // some operations require additional memory for fleeting data:
+     switch (tensor->op) {
++        case GGML_OP_MUL_MAT:
++            {
++                // SLLM patch: split-K scratch of the qmm path
++                res += ggml_metal_sllm_qmm_extra(tensor);
++            } break;
+         case GGML_OP_MUL_MAT_ID:
+             {
+                 res += ggml_metal_op_mul_mat_id_extra_tpe(tensor);

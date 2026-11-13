@@ -1,0 +1,32 @@
+{
+  "what": "libggml-metal 0.27.0 from llama.cpp b11669 + SLLM patches; every other dylib is the official b11669 binary",
+  "source_commit": "620d222",
+  "source_tarball": "research/inference_runtime/vendor/llama-source.tar.gz",
+  "source_tarball_sha256": "da36b3375b80d9d237e3787ff04fa72887bce2c8eefb717023205e4e6bbdeaad",
+  "patches": [
+    {"file": "patches/0001-sllm-qmm-kernel.patch", "sha256": "8b6ec2f9ff6b9d223f90ab655690503689ec69344053225ae9d77ce9106bbffa"},
+    {"file": "patches/0002-sllm-qmm-hooks.patch", "sha256": "a85276f6e7c3550547da73a86ab86e87941a4d3de8ca9b4fa37fee8d53bc88de"},
+    {"file": "patches/0003-sllm-cascade-kernel.patch", "sha256": "42b131e0ad330449d66f987cf442dad78444615fca24ccd79d70ea7727581179"},
+    {"file": "patches/0004-sllm-cascade-hooks.patch", "sha256": "8dc8c908f471ad819b77bb182f196626ed25974390f1022cbebf85e7a2b3d52d"},
+    {"file": "patches/0005-sllm-cb-error.patch", "sha256": "90cf19dcd04528f08389e80f12254ebb40a14cd00a3f62e6da35bf025e5ded3a"},
+    {"file": "patches/0006-sllm-cascadeq.patch", "sha256": "fcaace7a2174c7bb52910b5ca8376afae0d101e14fde55cb4d9d26a64a5b54a1"},
+    {"file": "patches/0007-sllm-prefill-attn.patch", "sha256": "a4ec958e9b913f9f6f937d1a111d57866ff7fd109fbd54716a432ef8bf0a9a62"},
+    {"file": "patches/0008-sllm-fa-kv-f16-scratch.patch", "sha256": "297e9136cc11bf981fbf887f09e870012e8a5a6f112b633f031f49a134d80109"},
+    {"file": "patches/0009-sllm-argmax.patch", "sha256": "af946d77f9f53f77dc979c0ebe05b9d280e92164ac54584131545586651c964f"},
+    {"file": "patches/0010-sllm-qmm32.patch", "sha256": "4b05bf0adbe89d98c9744de3acd24f3ecce7f3381fd7a857c40152d4bad6d294"},
+    {"file": "patches/0011-sllm-pfa-pair.patch", "sha256": "f5d8e0cefa6879bcfe710ee7995e9c62c26aa3eb7c3309d34b7ec6e1c35b5dc6"},
+    {"file": "patches/0013-sllm-fuse.patch", "sha256": "5d8e570df63620a4cb2194a8581870fc5067fa8dae1e323c84149b721f70e8f6"},
+    {"file": "patches/0014-sllm-cascade-exact.patch", "sha256": "0d86112c22b78cf0d6ba1fff660bbb8765b07d9974d37e071e553b80c008c9d6"},
+    {"file": "patches/0020-sllm-queue-per-backend.patch", "sha256": "2e5e62fd1cba5156e39e54201a188853df8b1bc7bc3c9093fda50471e2450b59"}
+  ],
+  "profile_patches": 0,
+  "build_sh_sha256": "15059c569bef10bdea11eb8c02d74ef03519a27abe746dfd7fcace1ef2f97560",
+  "compiler": "Apple clang version 21.0.0 (clang-2100.1.1.101)",
+  "sdk": "26.5",
+  "flags": "-arch arm64 -mmacosx-version-min=13.3 -O3 -fPIC -ffile-prefix-map=<build>/src/= -DNDEBUG -DGGML_METAL_EMBED_LIBRARY -DGGML_BACKEND_BUILD -DGGML_BACKEND_SHARED -DGGML_SHARED -DGGML_BUILD -DGGML_SCHED_MAX_COPIES=4 -D_XOPEN_SOURCE=600 -D_DARWIN_C_SOURCE (-std=gnu11 for .m, -std=gnu++17 for .cpp; -I ggml/include ggml/src ggml/src/ggml-metal)",
+  "embedded_kernels": "fa_aux fa_f16 fa_f32 fa_q4_0 fa_q4_1 fa_q5_0 fa_q5_1 fa_q8_0 fa_tensor fa_vec_f16 fa_vec_f32 fa_vec_q4_0 fa_vec_q4_1 fa_vec_q5_0 fa_vec_q5_1 fa_vec_q8_0 mul_mv mul_mv_mma mul_mm quantize softmax norm unary binbcast reduce tri ssm wkv gated_delta_net solve_tri rope conv upscale argsort pool misc qmm cascade prefill",
+  "outputs": {
+    "lib/libggml-metal.0.27.0.dylib": "76f56010aefaa26f01fe07cf7b061b624d77b238f44abb1733081098e95e3b06"
+  },
+  "official_copies_verified_against": "engine/vendor/ggml-b11669/SHA256SUMS"
+}

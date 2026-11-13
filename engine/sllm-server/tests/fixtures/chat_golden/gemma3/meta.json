@@ -1,0 +1,10 @@
+{
+ "family": "gemma3",
+ "now_as_utc": 1793377106,
+ "gguf": "gemma-3-4b-it-qat-Q4_0.gguf",
+ "llama_server": "b11669-620d2225c",
+ "bos_token": "<bos>",
+ "eos_token": "<end_of_turn>",
+ "chat_template_sha256": "8d9e3a3c114fb2053ec500184677af4f7e5f8ec2582443cd535834e68b3ade29",
+ "generations": 4
+}

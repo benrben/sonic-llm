@@ -1,0 +1,10 @@
+{
+ "family": "mistral",
+ "now_as_utc": 1793377117,
+ "gguf": "Mistral-7B-Instruct-v0.3-Q4_K_M.gguf",
+ "llama_server": "b11669-620d2225c",
+ "bos_token": "<s>",
+ "eos_token": "</s>",
+ "chat_template_sha256": "26a59556925c987317ce5291811ba3b7f32ec4c647c400c6cc7e3a9993007ba7",
+ "generations": 4
+}

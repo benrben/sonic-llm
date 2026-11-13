@@ -1,0 +1,974 @@
+SLLM patch 6 (kvmixed): mixed-precision cascade: the suffix pass over q8_0 own pages (kernel appended to kernels/cascade.metal),
+ggml-metal-cascadeq.{h,m} (plan, encoder, self-test, status) and its hooks (source list, init call, FLASH_ATTN_EXT branch, scratch).
+Against llama.cpp b11669 (source tarball 620d222) after patches 1-5 (0005 when present), applied with patch -p1 in ggml/. Adds lines only.
+
+--- a/src/ggml-metal/CMakeLists.txt	2026-10-27 02:21:37
++++ b/src/ggml-metal/CMakeLists.txt	2026-10-27 02:25:04
+@@ -15,6 +15,7 @@
+                          ggml-metal-tuning.cpp
+                          ggml-metal-qmm.m
+                          ggml-metal-cascade.m
++                         ggml-metal-cascadeq.m
+                         )
+ 
+ target_link_libraries(ggml-metal PRIVATE
+--- a/src/ggml-metal/ggml-metal-cascadeq.h	1970-01-01 02:00:00
++++ b/src/ggml-metal/ggml-metal-cascadeq.h	2026-10-27 02:53:18
+@@ -0,0 +1,67 @@
++// SLLM patch 6 (kvmixed): mixed-precision decode attention for the cascade: the shared prefix (and each agent's
++// partly filled tail page) in f16 pages, each agent's full own pages in q8_0 pages.
++//
++// The op: a GGML_OP_FLASH_ATTN_EXT whose src[1] / src[2] are the f16 K/V views [D, n16, HKV] (n16 cells) and whose
++// src[5] / src[6] are q8_0 K/V views [D, n8, HKV] of the q8_0 page pool. The mask [>= n16 + n8, >= N] covers the
++// concatenated cells: column c < n16 is f16 cell c, column n16 + c is q8_0 cell c. sllm-core marks such an op with
++//   op_params[8] = GGML_METAL_SLLM_CASCADEQ_MAGIC
++//   op_params[9] = p0, op_params[10] = p1: the shared prefix range [p0, p1) of the f16 view (p0 == p1: none)
++//   op_params[11] = 1 when the q8_0 keys are stored rotated (H k, H the orthonormal Sylvester-Hadamard matrix of size
++//                   D, llama.cpp's attention rotation); the q8_0 values are never rotated
++// Official ggml and the CPU backend ignore src[5] / src[6] and these slots, so the op is only correct on this path:
++// a marked op this path cannot take aborts (sllm-core builds them only when ggml_backend_metal_sllm_cascadeq_status
++// says "active"). There is no row floor: a marked op with any number of query rows (agents, or prefill rows of one
++// agent) takes it.
++#pragma once
++
++#include "ggml.h"
++#include "ggml-metal-device.h"
++#include "ggml-metal-cascade.h"
++
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define GGML_METAL_SLLM_CASCADEQ_MAGIC 0x534C4D58 // "SLMX"
++
++struct ggml_metal_sllm_cascadeq_plan {
++    int D;      // head size (128 or 256)
++    int rt;     // prefix row tile (16 or 32)
++    int c;      // prefix cells per step (64)
++    int n_pre;  // prefix threadgroups of the fused dispatch
++    size_t mask_off8;  // bytes from the mask to its first q8_0 column
++    // scratch after dst (offsets from the end of dst, bytes)
++    size_t off_qh, off_l16, off_c16, off_po, off_pml, off_qh8, off_l8, off_c8, extra;
++    ggml_metal_kargs_sllm_cascade a16;  // the f16 part (S = prefix splits)
++    ggml_metal_kargs_sllm_cascade a8;   // the q8_0 part (q8_0 strides, ne11 = n8, p0 = p1 = 0, S = slot of its partial)
++    ggml_metal_kargs_sllm_cascade am;   // the merge (S + 2 partials)
++};
++
++// true when op carries the mixed-precision mark (op_params[8])
++bool ggml_metal_sllm_cascadeq_marked(const struct ggml_tensor * op);
++
++// true when this path takes the marked op (active, supported shapes and layout)
++bool ggml_metal_sllm_cascadeq_plan_op(const struct ggml_tensor * op, struct ggml_metal_sllm_cascadeq_plan * plan);
++
++// bytes of scratch the dst of this FLASH_ATTN_EXT needs beyond ggml_nbytes (0 unless this path takes it)
++size_t ggml_metal_sllm_cascadeq_extra(const struct ggml_tensor * op);
++
++// encode: scan (f16 part, q8_0 part), barrier, fused f16 pass + q8_0 suffix pass, barrier, merge
++bool ggml_metal_sllm_cascadeq_encode(ggml_metal_library_t lib, ggml_metal_encoder_t enc, const struct ggml_metal_sllm_cascadeq_plan * plan,
++        struct ggml_metal_buffer_id q, struct ggml_metal_buffer_id k, struct ggml_metal_buffer_id v,
++        struct ggml_metal_buffer_id mask, struct ggml_metal_buffer_id k8, struct ggml_metal_buffer_id v8,
++        struct ggml_metal_buffer_id dst);
++
++// called once by ggml_metal_device_init after the cascade's init: reads SLLM_CASCADE, runs the self-test
++void ggml_metal_sllm_cascadeq_device_init(ggml_metal_device_t dev, ggml_metal_library_t lib, bool has_tensor);
++
++// exported: a JSON object (patch, active, reason, self-test, dispatch count); thread-local buffer
++const char * ggml_backend_metal_sllm_cascadeq_status(void);
++
++#ifdef __cplusplus
++}
++#endif
+--- a/src/ggml-metal/ggml-metal-cascadeq.m	1970-01-01 02:00:00
++++ b/src/ggml-metal/ggml-metal-cascadeq.m	2026-10-27 02:53:18
+@@ -0,0 +1,633 @@
++// SLLM patch 6 (kvmixed): dispatch, self-test and status of the mixed-precision cascade (f16 shared prefix and tail,
++// q8_0 own pages). See ggml-metal-cascadeq.h for the op and kernels/cascade.metal (kernel_sllm_cascade_suffixq8).
++//
++// Mode: off when SLLM_CASCADE=0 (the cascade's A/B switch turns this path off too), otherwise on when the device has
++// the Metal 4 tensor API and the self-test passes. SLLM_CASCADE_TRACE=1 prints every dispatch to stderr.
++//
++// Conditions (a marked op that fails one aborts: ggml's kernels cannot read the q8_0 views): q f32; K/V f16 views and
++// q8_0 views with contiguous head rows, head size 128 or 256, G = H / HKV in {2, 4}; one stream; an f16 mask covering
++// both parts and every row, one for all heads; no sinks, ALiBi or softcap; dst contiguous f32; n16 % 32 == 0;
++// [p0, p1) inside the f16 view with p0 % 32 == 0 and (p1 - p0) % 64 == 0.
++//
++// Encoding: the cascade's own scan over the f16 columns, and again over the q8_0 columns (p0 = p1 = 0: every finite
++// 32-cell block is a suffix block); barrier; the cascade's fused dispatch over the f16 part (prefix splits 0..S-1,
++// the f16 suffix in slot S) and kernel_sllm_cascade_suffixq8 (slot S + 1), in one concurrent phase; barrier; the
++// cascade's merge over S + 2 partials. Prefix tiles and splits are the cascade's (ggml-metal-cascade.m).
++
++#import "ggml-metal-cascadeq.h"
++
++#import "ggml-impl.h"
++
++#import <Foundation/Foundation.h>
++#import <Metal/Metal.h>
++
++#include <math.h>
++#include <stdatomic.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#define SLLM_CQ_C    64   // prefix cells per step
++#define SLLM_CQ_B    32   // suffix block (cells)
++#define SLLM_CQ_NTH  128  // fused and q8_0 suffix threadgroups: 4 simdgroups
++#define SLLM_CQ_Q8_BYTES 34
++
++static struct {
++    bool initialized;
++    bool active;
++    bool trace;
++    char reason[256];
++    bool selftest_ran;
++    bool selftest_pass;
++    int  selftest_cases;
++    int  selftest_repeats;
++    double selftest_worst_max_rel;
++    double selftest_worst_rel_rms;
++    double selftest_ms;
++    atomic_ullong dispatches;
++} g_cq;
++
++static size_t sllm_cq_align(size_t x) { return (x + 255) & ~(size_t) 255; }
++
++static void sllm_cq_args(ggml_metal_kargs_sllm_cascade * a, int N, int H, int HKV, int Rpad, int ne11, int p0, int p1, int chunk,
++        int S, int nblk, uint64_t nb01, uint64_t nb02, uint64_t nb11, uint64_t nb12, uint64_t nb21, uint64_t nb22, uint64_t nb31, float scale) {
++    memset(a, 0, sizeof(*a));
++    a->ne01 = N; a->H = H; a->HKV = HKV; a->G = H/HKV; a->R = N*(H/HKV); a->Rpad = Rpad; a->ne11 = ne11;
++    a->p0 = p0; a->p1 = p1; a->chunk = chunk; a->S = S; a->nblk = nblk;
++    a->nb01 = nb01; a->nb02 = nb02; a->nb11 = nb11; a->nb12 = nb12; a->nb21 = nb21; a->nb22 = nb22; a->nb31 = nb31;
++    a->scale = scale;
++}
++
++// fill the plan from the shapes; false when a size limit is exceeded
++static bool sllm_cq_fill_plan(struct ggml_metal_sllm_cascadeq_plan * p, int D, int N, int H, int HKV, int n16, int n8, int p0, int p1, int rot,
++        uint64_t nb01, uint64_t nb02, uint64_t nb11, uint64_t nb12, uint64_t nb21, uint64_t nb22,
++        uint64_t nb11q, uint64_t nb12q, uint64_t nb21q, uint64_t nb22q, uint64_t nb31, float scale) {
++    const int G = H/HKV;
++    const int R = N*G;
++    const int rt = R <= 16 ? 16 : 32;
++    const int Rpad = (R + rt - 1)/rt*rt;
++    const int P = p1 - p0;
++    int S = 0, chunk = SLLM_CQ_C;
++    if (P > 0) {
++        S = R <= 32 ? 4 : 2;
++        chunk = (P + S - 1)/S;
++        chunk = (chunk + SLLM_CQ_C - 1)/SLLM_CQ_C*SLLM_CQ_C;
++        S = (P + chunk - 1)/chunk;
++    }
++    const int nbt16 = p0/SLLM_CQ_B + (n16 - p1 + SLLM_CQ_B - 1)/SLLM_CQ_B;
++    const int nbt8 = (n8 + SLLM_CQ_B - 1)/SLLM_CQ_B;
++    if (nbt16 > 256*32 || nbt8 > 256*32) {
++        return false; // the scan keeps one bit per block in a register: at most 32 blocks per thread
++    }
++    const int nblk16 = nbt16 > 0 ? nbt16 : 1;
++    const int nblk8 = nbt8 > 0 ? nbt8 : 1;
++
++    p->D     = D;
++    p->rt    = rt;
++    p->c     = SLLM_CQ_C;
++    p->n_pre = HKV*S*(Rpad/rt);
++    p->mask_off8 = (size_t) n16*2;
++
++    size_t off = 0;
++    p->off_qh  = off; off += sllm_cq_align((size_t) HKV*Rpad*D*2);
++    p->off_l16 = off; off += sllm_cq_align((size_t) N*nblk16*4);
++    p->off_c16 = off; off += sllm_cq_align((size_t) N*4);
++    p->off_po  = off; off += sllm_cq_align((size_t) (S + 2)*HKV*Rpad*D*4);
++    p->off_pml = off; off += sllm_cq_align((size_t) (S + 2)*HKV*Rpad*2*4);
++    p->off_qh8 = off; off += sllm_cq_align((size_t) HKV*Rpad*D*2);
++    p->off_l8  = off; off += sllm_cq_align((size_t) N*nblk8*4);
++    p->off_c8  = off; off += sllm_cq_align((size_t) N*4);
++    p->extra   = off;
++
++    sllm_cq_args(&p->a16, N, H, HKV, Rpad, n16, p0, p1, chunk, S, nblk16, nb01, nb02, nb11, nb12, nb21, nb22, nb31, scale);
++    sllm_cq_args(&p->a8, N, H, HKV, Rpad, n8, 0, 0, chunk, S + 1, nblk8, nb01, nb02, nb11q, nb12q, nb21q, nb22q, nb31, scale);
++    p->a8.pad0 = rot ? 1 : 0; // the q8_0 suffix kernel rotates its queries
++    p->am = p->a16;
++    p->am.S = S + 1;
++    return true;
++}
++
++bool ggml_metal_sllm_cascadeq_marked(const struct ggml_tensor * op) {
++    return op->op == GGML_OP_FLASH_ATTN_EXT && ggml_get_op_params_i32(op, 8) == GGML_METAL_SLLM_CASCADEQ_MAGIC;
++}
++
++static bool sllm_cq_reject(const struct ggml_tensor * op, int cond) {
++    if (g_cq.trace) {
++        fprintf(stderr, "sllm_cascadeq: marked op %s not taken (condition %d)\n", op->name, cond);
++    }
++    return false;
++}
++
++bool ggml_metal_sllm_cascadeq_plan_op(const struct ggml_tensor * op, struct ggml_metal_sllm_cascadeq_plan * plan) {
++    if (!ggml_metal_sllm_cascadeq_marked(op)) {
++        return false;
++    }
++    if (!g_cq.active) {
++        return sllm_cq_reject(op, 0);
++    }
++    const struct ggml_tensor * q  = op->src[0];
++    const struct ggml_tensor * k  = op->src[1];
++    const struct ggml_tensor * v  = op->src[2];
++    const struct ggml_tensor * m  = op->src[3];
++    const struct ggml_tensor * k8 = op->src[5];
++    const struct ggml_tensor * v8 = op->src[6];
++    if (!q || !k || !v || !m || op->src[4] || !k8 || !v8) {
++        return sllm_cq_reject(op, 1);
++    }
++    float scale, max_bias, softcap;
++    memcpy(&scale,    (const int32_t *) op->op_params + 0, sizeof(float));
++    memcpy(&max_bias, (const int32_t *) op->op_params + 1, sizeof(float));
++    memcpy(&softcap,  (const int32_t *) op->op_params + 2, sizeof(float));
++    if (max_bias != 0.0f || softcap != 0.0f) {
++        return sllm_cq_reject(op, 2);
++    }
++    if (q->type != GGML_TYPE_F32 || k->type != GGML_TYPE_F16 || v->type != GGML_TYPE_F16 || m->type != GGML_TYPE_F16 || op->type != GGML_TYPE_F32 ||
++        k8->type != GGML_TYPE_Q8_0 || v8->type != GGML_TYPE_Q8_0) {
++        return sllm_cq_reject(op, 3);
++    }
++    const int64_t D = q->ne[0], N = q->ne[1], H = q->ne[2];
++    const int64_t n16 = k->ne[1], HKV = k->ne[2], n8 = k8->ne[1];
++    if ((D != 128 && D != 256) || k->ne[0] != D || v->ne[0] != D || v->ne[1] != n16 || v->ne[2] != HKV ||
++        k8->ne[0] != D || v8->ne[0] != D || v8->ne[1] != n8 || k8->ne[2] != HKV || v8->ne[2] != HKV) {
++        return sllm_cq_reject(op, 4);
++    }
++    if (q->ne[3] != 1 || k->ne[3] != 1 || v->ne[3] != 1 || k8->ne[3] != 1 || v8->ne[3] != 1 || HKV <= 0 || H % HKV != 0 ||
++        (H/HKV != 2 && H/HKV != 4)) {
++        return sllm_cq_reject(op, 5);
++    }
++    if (N < 1 || N > 4096 || n16 + n8 > (1 << 24) || n16 % SLLM_CQ_B != 0) {
++        return sllm_cq_reject(op, 6);
++    }
++    const int64_t p0 = ggml_get_op_params_i32(op, 9), p1 = ggml_get_op_params_i32(op, 10);
++    if (p0 < 0 || p1 < p0 || p1 > n16 || p0 % SLLM_CQ_B != 0 || (p1 - p0) % SLLM_CQ_C != 0) {
++        return sllm_cq_reject(op, 7);
++    }
++    if (q->nb[0] != sizeof(float) || q->nb[1] % 4 != 0 || q->nb[2] % 4 != 0) {
++        return sllm_cq_reject(op, 8);
++    }
++    if (k->nb[0] != 2 || v->nb[0] != 2 || k->nb[1] % 16 != 0 || k->nb[2] % 16 != 0 || v->nb[1] % 16 != 0 || v->nb[2] % 16 != 0 ||
++        k->nb[1]/2 > INT32_MAX || v->nb[1]/2 > INT32_MAX) {
++        return sllm_cq_reject(op, 9);
++    }
++    // q8_0 views: whole blocks per head row, 2-byte aligned rows (the kernel reads 2-byte pairs)
++    if (k8->nb[0] != SLLM_CQ_Q8_BYTES || v8->nb[0] != SLLM_CQ_Q8_BYTES || k8->nb[1] % 2 != 0 || k8->nb[2] % 2 != 0 ||
++        v8->nb[1] % 2 != 0 || v8->nb[2] % 2 != 0) {
++        return sllm_cq_reject(op, 10);
++    }
++    if (m->ne[0] < n16 + n8 || m->ne[1] < N || m->ne[2] != 1 || m->ne[3] != 1 || m->nb[0] != 2 || m->nb[1] % 16 != 0) {
++        return sllm_cq_reject(op, 11);
++    }
++    if (op->ne[0] != D || op->ne[1] != H || op->ne[2] != N || op->ne[3] != 1 || !ggml_is_contiguous(op)) {
++        return sllm_cq_reject(op, 12);
++    }
++    struct ggml_metal_sllm_cascadeq_plan p;
++    const int rot = ggml_get_op_params_i32(op, 11);
++    if (rot != 0 && rot != 1) {
++        return sllm_cq_reject(op, 14);
++    }
++    if (!sllm_cq_fill_plan(&p, (int) D, (int) N, (int) H, (int) HKV, (int) n16, (int) n8, (int) p0, (int) p1, rot,
++            q->nb[1], q->nb[2], k->nb[1], k->nb[2], v->nb[1], v->nb[2], k8->nb[1], k8->nb[2], v8->nb[1], v8->nb[2], m->nb[1], scale)) {
++        return sllm_cq_reject(op, 13);
++    }
++    if (plan) {
++        *plan = p;
++    }
++    return true;
++}
++
++size_t ggml_metal_sllm_cascadeq_extra(const struct ggml_tensor * op) {
++    struct ggml_metal_sllm_cascadeq_plan p;
++    if (!ggml_metal_sllm_cascadeq_plan_op(op, &p)) {
++        return 0;
++    }
++    return p.extra;
++}
++
++static struct ggml_metal_pipeline_with_params sllm_cq_get_pipeline(ggml_metal_library_t lib, const char * base) {
++    struct ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, base);
++    if (!res.pipeline) {
++        res = ggml_metal_library_compile_pipeline(lib, base, base, NULL);
++    }
++    return res;
++}
++
++static struct ggml_metal_buffer_id sllm_cq_at(struct ggml_metal_buffer_id b, size_t off) {
++    b.offs += off;
++    return b;
++}
++
++bool ggml_metal_sllm_cascadeq_encode(ggml_metal_library_t lib, ggml_metal_encoder_t enc, const struct ggml_metal_sllm_cascadeq_plan * plan,
++        struct ggml_metal_buffer_id q, struct ggml_metal_buffer_id k, struct ggml_metal_buffer_id v,
++        struct ggml_metal_buffer_id mask, struct ggml_metal_buffer_id k8, struct ggml_metal_buffer_id v8,
++        struct ggml_metal_buffer_id dst) {
++    const ggml_metal_kargs_sllm_cascade * a = &plan->a16;
++    if (q.offs % 4 != 0 || k.offs % 16 != 0 || v.offs % 16 != 0 || mask.offs % 16 != 0 || dst.offs % 16 != 0 ||
++        k8.offs % 2 != 0 || v8.offs % 2 != 0) {
++        if (g_cq.trace) {
++            fprintf(stderr, "sllm_cascadeq: misaligned buffers\n");
++        }
++        return false;
++    }
++    char name[96];
++    struct ggml_metal_pipeline_with_params p_scan = sllm_cq_get_pipeline(lib, "kernel_sllm_cascade_scan");
++    snprintf(name, sizeof(name), "kernel_sllm_cascade_fused_d%d_rt%d_c%d_g%d", plan->D, plan->rt, plan->c, a->G);
++    struct ggml_metal_pipeline_with_params p_fus = sllm_cq_get_pipeline(lib, name);
++    snprintf(name, sizeof(name), "kernel_sllm_cascade_suffixq8_d%d_g%d", plan->D, a->G);
++    struct ggml_metal_pipeline_with_params p_q8 = sllm_cq_get_pipeline(lib, name);
++    snprintf(name, sizeof(name), "kernel_sllm_cascade_merge_d%d", plan->D);
++    struct ggml_metal_pipeline_with_params p_mrg = sllm_cq_get_pipeline(lib, name);
++    if (!p_scan.pipeline || !p_fus.pipeline || !p_q8.pipeline || !p_mrg.pipeline ||
++        ggml_metal_pipeline_max_theads_per_threadgroup(p_fus) < SLLM_CQ_NTH || ggml_metal_pipeline_max_theads_per_threadgroup(p_q8) < SLLM_CQ_NTH) {
++        return false;
++    }
++    const size_t tg_pre = (size_t) plan->rt*plan->c*(4 + 2) + (size_t) plan->rt*4 + 32;
++    const size_t tg_suf = (size_t) (a->G*plan->D + 4*a->G*(2 + plan->D))*4;
++    const size_t tg_fus = ((tg_pre > tg_suf ? tg_pre : tg_suf) + 15)/16*16;
++    const size_t tg_q8  = (tg_suf + 15)/16*16;
++    if (tg_fus > 32768) {
++        return false;
++    }
++
++    const size_t base = (size_t) plan->D*a->H*a->ne01*sizeof(float); // ggml_nbytes(dst)
++    const struct ggml_metal_buffer_id b_qh  = sllm_cq_at(dst, base + plan->off_qh);
++    const struct ggml_metal_buffer_id b_l16 = sllm_cq_at(dst, base + plan->off_l16);
++    const struct ggml_metal_buffer_id b_c16 = sllm_cq_at(dst, base + plan->off_c16);
++    const struct ggml_metal_buffer_id b_po  = sllm_cq_at(dst, base + plan->off_po);
++    const struct ggml_metal_buffer_id b_pml = sllm_cq_at(dst, base + plan->off_pml);
++    const struct ggml_metal_buffer_id b_qh8 = sllm_cq_at(dst, base + plan->off_qh8);
++    const struct ggml_metal_buffer_id b_l8  = sllm_cq_at(dst, base + plan->off_l8);
++    const struct ggml_metal_buffer_id b_c8  = sllm_cq_at(dst, base + plan->off_c8);
++    const struct ggml_metal_buffer_id m8    = sllm_cq_at(mask, plan->mask_off8);
++    const int32_t D = plan->D;
++
++    ggml_metal_kargs_sllm_cascade a16 = plan->a16, a8 = plan->a8, am = plan->am;
++
++    // 1. block lists (f16 part, q8_0 part) and half Q
++    ggml_metal_encoder_set_pipeline(enc, p_scan);
++    ggml_metal_encoder_set_bytes   (enc, &a16, sizeof(a16), 0);
++    ggml_metal_encoder_set_buffer  (enc, q,     1);
++    ggml_metal_encoder_set_buffer  (enc, mask,  2);
++    ggml_metal_encoder_set_buffer  (enc, b_qh,  3);
++    ggml_metal_encoder_set_buffer  (enc, b_l16, 4);
++    ggml_metal_encoder_set_buffer  (enc, b_c16, 5);
++    ggml_metal_encoder_set_bytes   (enc, (void *) &D, sizeof(D), 6);
++    ggml_metal_encoder_set_threadgroup_memory_size(enc, 64, 0);
++    ggml_metal_encoder_dispatch_threadgroups(enc, (a->Rpad + a->G - 1)/a->G, 1, 1, 256, 1, 1);
++
++    ggml_metal_encoder_set_pipeline(enc, p_scan);
++    ggml_metal_encoder_set_bytes   (enc, &a8, sizeof(a8), 0);
++    ggml_metal_encoder_set_buffer  (enc, q,     1);
++    ggml_metal_encoder_set_buffer  (enc, m8,    2);
++    ggml_metal_encoder_set_buffer  (enc, b_qh8, 3);
++    ggml_metal_encoder_set_buffer  (enc, b_l8,  4);
++    ggml_metal_encoder_set_buffer  (enc, b_c8,  5);
++    ggml_metal_encoder_set_bytes   (enc, (void *) &D, sizeof(D), 6);
++    ggml_metal_encoder_set_threadgroup_memory_size(enc, 64, 0);
++    ggml_metal_encoder_dispatch_threadgroups(enc, (a->Rpad + a->G - 1)/a->G, 1, 1, 256, 1, 1);
++
++    ggml_metal_encoder_memory_barrier(enc);
++
++    // 2. the f16 prefix and suffix passes (one dispatch) and the q8_0 suffix pass
++    ggml_metal_encoder_set_pipeline(enc, p_fus);
++    ggml_metal_encoder_set_bytes   (enc, &a16, sizeof(a16), 0);
++    ggml_metal_encoder_set_buffer  (enc, q,     1);
++    ggml_metal_encoder_set_buffer  (enc, b_qh,  2);
++    ggml_metal_encoder_set_buffer  (enc, k,     3);
++    ggml_metal_encoder_set_buffer  (enc, v,     4);
++    ggml_metal_encoder_set_buffer  (enc, mask,  5);
++    ggml_metal_encoder_set_buffer  (enc, b_po,  6);
++    ggml_metal_encoder_set_buffer  (enc, b_pml, 7);
++    ggml_metal_encoder_set_buffer  (enc, b_l16, 8);
++    ggml_metal_encoder_set_buffer  (enc, b_c16, 9);
++    ggml_metal_encoder_set_threadgroup_memory_size(enc, tg_fus, 0);
++    ggml_metal_encoder_dispatch_threadgroups(enc, plan->n_pre + a->HKV*a->ne01, 1, 1, SLLM_CQ_NTH, 1, 1);
++
++    ggml_metal_encoder_set_pipeline(enc, p_q8);
++    ggml_metal_encoder_set_bytes   (enc, &a8, sizeof(a8), 0);
++    ggml_metal_encoder_set_buffer  (enc, q,     1);
++    ggml_metal_encoder_set_buffer  (enc, k8,    2);
++    ggml_metal_encoder_set_buffer  (enc, v8,    3);
++    ggml_metal_encoder_set_buffer  (enc, m8,    4);
++    ggml_metal_encoder_set_buffer  (enc, b_po,  5);
++    ggml_metal_encoder_set_buffer  (enc, b_pml, 6);
++    ggml_metal_encoder_set_buffer  (enc, b_l8,  7);
++    ggml_metal_encoder_set_buffer  (enc, b_c8,  8);
++    ggml_metal_encoder_set_threadgroup_memory_size(enc, tg_q8, 0);
++    ggml_metal_encoder_dispatch_threadgroups(enc, a->HKV*a->ne01, 1, 1, SLLM_CQ_NTH, 1, 1);
++
++    ggml_metal_encoder_memory_barrier(enc);
++
++    // 3. merge the S + 2 partials
++    ggml_metal_encoder_set_pipeline(enc, p_mrg);
++    ggml_metal_encoder_set_bytes   (enc, &am, sizeof(am), 0);
++    ggml_metal_encoder_set_buffer  (enc, b_po,  1);
++    ggml_metal_encoder_set_buffer  (enc, b_pml, 2);
++    ggml_metal_encoder_set_buffer  (enc, dst,   3);
++    ggml_metal_encoder_dispatch_threadgroups(enc, a->H, a->ne01, 1, 32, 1, 1);
++
++    atomic_fetch_add(&g_cq.dispatches, 1);
++    if (g_cq.trace) {
++        fprintf(stderr, "sllm_cascadeq: D=%d N=%d H=%d HKV=%d cells f16=%d q8_0=%d prefix=[%d,%d) S=%d rt=%d\n",
++                plan->D, a->ne01, a->H, a->HKV, a->ne11, plan->a8.ne11, a->p0, a->p1, a->S, plan->rt);
++    }
++    return true;
++}
++
++//
++// self-test: f16 prefix + f16 tail pages + q8_0 own pages, against a double softmax over the dequantised data; both
++// head sizes, G = 2 and 4, 1 to 9 agents (no row floor), no prefix range, window-hidden prefix cells, partly visible
++// pages; and a repeat-determinism check (the same op several times, outputs bitwise equal)
++//
++
++static uint64_t sllm_cq_rng(uint64_t * s) {
++    *s ^= *s << 13; *s ^= *s >> 7; *s ^= *s << 17;
++    return *s;
++}
++static float sllm_cq_rngf(uint64_t * s) { // uniform in [-1, 1)
++    return (float) (sllm_cq_rng(s) >> 40) / (float) (1ull << 23) - 1.0f;
++}
++
++// ggml's quantize_row_q8_0_ref for one block of 32 values; writes the dequantised values back into x
++static void sllm_cq_quant_block(float * x, uint8_t * out) {
++    float amax = 0.0f;
++    for (int j = 0; j < 32; ++j) amax = fmaxf(amax, fabsf(x[j]));
++    const float d = amax/127.0f;
++    const float id = d ? 1.0f/d : 0.0f;
++    const __fp16 dh = (__fp16) d;
++    memcpy(out, &dh, 2);
++    for (int j = 0; j < 32; ++j) {
++        const int8_t qv = (int8_t) roundf(x[j]*id);
++        out[2 + j] = (uint8_t) qv;
++        x[j] = (float) dh*(float) qv;
++    }
++}
++
++struct sllm_cq_case {
++    int D, H, HKV, N;
++    int P;      // f16 view: prefix cells [0, P) (the hint range), then one 256-cell tail page per agent
++    int hide;   // prefix cells [0, hide) hidden from every row (a window)
++    int tail;   // visible cells of agent n's tail page: tail - (n % 3) * 5
++    int own8;   // q8_0 view: own8 cells per agent; agent n sees own8 - (n % 2) * 32 of them
++    int rot;    // the q8_0 keys are stored rotated (H k)
++};
++
++// in-place orthonormal Sylvester-Hadamard transform of n (a power of two) values, in double
++static void sllm_cq_fwht(double * x, int n) {
++    for (int h = 1; h < n; h <<= 1) {
++        for (int i = 0; i < n; i += 2*h) {
++            for (int j = i; j < i + h; ++j) {
++                const double a = x[j], b = x[j + h];
++                x[j] = a + b; x[j + h] = a - b;
++            }
++        }
++    }
++    const double s = 1.0/sqrt((double) n);
++    for (int i = 0; i < n; ++i) x[i] *= s;
++}
++
++static bool sllm_cq_selftest(ggml_metal_device_t dev, ggml_metal_library_t lib, char * why, size_t why_n) {
++    const struct sllm_cq_case cases[3] = {
++        { 128, 4, 2, 9,  512,  64,  40, 512, 1 },
++        { 256, 8, 4, 3, 1024, 640, 200, 256, 1 },
++        { 128, 8, 2, 1,    0,   0, 100, 512, 0 },
++    };
++    const int repeats[3] = { 1, 6, 1 };
++    id<MTLDevice> device = (id<MTLDevice>) ggml_metal_device_get_obj(dev);
++    if (!device) {
++        snprintf(why, why_n, "no MTLDevice");
++        return false;
++    }
++    bool ok = true;
++    const int64_t t0 = ggml_time_us();
++    double worst_max = 0.0, worst_rms = 0.0;
++    int n_cases = 0, n_rep = 0;
++
++    @autoreleasepool {
++        id<MTLCommandQueue> queue = [device newCommandQueue];
++        if (!queue) {
++            snprintf(why, why_n, "newCommandQueue failed");
++            return false;
++        }
++        for (int ci = 0; ci < 3 && ok; ++ci) {
++            const struct sllm_cq_case c = cases[ci];
++            const int G = c.H/c.HKV;
++            const int n16 = c.P + c.N*256, n8 = c.N*c.own8, W = n16 + n8;
++            const size_t rowk = (size_t) c.HKV*c.D;           // halfs per f16 cell
++            const size_t row8 = (size_t) c.HKV*(c.D/32)*SLLM_CQ_Q8_BYTES; // bytes per q8_0 cell
++            struct ggml_metal_sllm_cascadeq_plan plan;
++            if (!sllm_cq_fill_plan(&plan, c.D, c.N, c.H, c.HKV, n16, n8, 0, c.P, c.rot, (uint64_t) c.H*c.D*4, (uint64_t) c.D*4,
++                    rowk*2, (uint64_t) c.D*2, rowk*2, (uint64_t) c.D*2, row8, (uint64_t) (c.D/32)*SLLM_CQ_Q8_BYTES, row8,
++                    (uint64_t) (c.D/32)*SLLM_CQ_Q8_BYTES, (uint64_t) W*2, 1.0f/sqrtf((float) c.D))) {
++                snprintf(why, why_n, "plan failed for case %d", ci);
++                ok = false;
++                break;
++            }
++            const size_t dst_bytes = (size_t) c.D*c.H*c.N*4;
++            id<MTLBuffer> bq  = [device newBufferWithLength:(size_t) c.N*c.H*c.D*4 options:MTLResourceStorageModeShared];
++            id<MTLBuffer> bk  = [device newBufferWithLength:(size_t) n16*rowk*2 options:MTLResourceStorageModeShared];
++            id<MTLBuffer> bv  = [device newBufferWithLength:(size_t) n16*rowk*2 options:MTLResourceStorageModeShared];
++            id<MTLBuffer> bk8 = [device newBufferWithLength:(size_t) n8*row8 + 2 options:MTLResourceStorageModeShared];
++            id<MTLBuffer> bv8 = [device newBufferWithLength:(size_t) n8*row8 + 2 options:MTLResourceStorageModeShared];
++            id<MTLBuffer> bm  = [device newBufferWithLength:(size_t) c.N*W*2 options:MTLResourceStorageModeShared];
++            id<MTLBuffer> bd  = [device newBufferWithLength:dst_bytes + plan.extra options:MTLResourceStorageModeShared];
++            float * kf = (float *) malloc((size_t) W*rowk*sizeof(float)); // reference K/V over [f16 | q8_0] cells
++            float * vf = (float *) malloc((size_t) W*rowk*sizeof(float));
++            float * first = (float *) malloc(dst_bytes);
++            if (!bq || !bk || !bv || !bk8 || !bv8 || !bm || !bd || !kf || !vf || !first) {
++                snprintf(why, why_n, "buffer allocation failed");
++                ok = false;
++            }
++            if (ok) {
++                uint64_t seed = 0x5C8D0A11ull + 7919*ci;
++                float * q = (float *) [bq contents];
++                __fp16 * k = (__fp16 *) [bk contents];
++                __fp16 * v = (__fp16 *) [bv contents];
++                // odd q8_0 buffer offsets: the views start 2 bytes in (rows at 2 mod 4)
++                uint8_t * k8 = (uint8_t *) [bk8 contents] + 2;
++                uint8_t * v8 = (uint8_t *) [bv8 contents] + 2;
++                __fp16 * m = (__fp16 *) [bm contents];
++                float * d = (float *) [bd contents];
++                for (size_t i = 0; i < (size_t) c.N*c.H*c.D; ++i) q[i] = 3.0f*sllm_cq_rngf(&seed);
++                for (size_t i = 0; i < (size_t) n16*rowk; ++i) {
++                    k[i] = (__fp16) sllm_cq_rngf(&seed); v[i] = (__fp16) sllm_cq_rngf(&seed);
++                    kf[i] = (float) k[i]; vf[i] = (float) v[i];
++                }
++                for (int cell = 0; cell < n8; ++cell) {
++                    for (int b = 0; b < c.HKV*c.D/32; ++b) {
++                        float xk[32], xv[32];
++                        for (int j = 0; j < 32; ++j) { xk[j] = sllm_cq_rngf(&seed); xv[j] = sllm_cq_rngf(&seed); }
++                        sllm_cq_quant_block(xk, k8 + (size_t) cell*row8 + (size_t) b*SLLM_CQ_Q8_BYTES);
++                        sllm_cq_quant_block(xv, v8 + (size_t) cell*row8 + (size_t) b*SLLM_CQ_Q8_BYTES);
++                        memcpy(kf + ((size_t) n16 + cell)*rowk + (size_t) b*32, xk, sizeof(xk));
++                        memcpy(vf + ((size_t) n16 + cell)*rowk + (size_t) b*32, xv, sizeof(xv));
++                    }
++                    if (c.rot) {
++                        // the stored keys are H k: the reference key of each head is H applied to the dequantised row
++                        double tmp[256];
++                        for (int hk = 0; hk < c.HKV; ++hk) {
++                            float * kr = kf + ((size_t) n16 + cell)*rowk + (size_t) hk*c.D;
++                            for (int e = 0; e < c.D; ++e) tmp[e] = kr[e];
++                            sllm_cq_fwht(tmp, c.D);
++                            for (int e = 0; e < c.D; ++e) kr[e] = (float) tmp[e];
++                        }
++                    }
++                }
++                for (size_t i = 0; i < dst_bytes/4; ++i) d[i] = NAN;
++                for (int n = 0; n < c.N; ++n) {
++                    __fp16 * row = m + (size_t) n*W;
++                    for (int j = 0; j < W; ++j) row[j] = (__fp16) -INFINITY;
++                    const int vis0 = c.hide + ((n & 1) ? 96 : 0);
++                    for (int j = vis0; j < c.P; ++j) row[j] = 0;
++                    const int tl = c.tail - (n % 3)*5;
++                    for (int j = 0; j < tl; ++j) row[c.P + n*256 + j] = 0;
++                    const int o8 = c.own8 - (n % 2)*32;
++                    for (int j = 0; j < o8; ++j) row[n16 + n*c.own8 + j] = 0;
++                }
++
++                for (int rep = 0; rep < repeats[ci] && ok; ++rep) {
++                    id<MTLCommandBuffer> cb = [queue commandBuffer];
++                    ggml_metal_encoder_t enc = ggml_metal_encoder_init((ggml_metal_cmd_buf_t) cb, false);
++                    const struct ggml_metal_buffer_id iq = { (void *) bq, 0 }, ik = { (void *) bk, 0 }, iv = { (void *) bv, 0 },
++                                                      ik8 = { (void *) bk8, 2 }, iv8 = { (void *) bv8, 2 },
++                                                      im = { (void *) bm, 0 }, idd = { (void *) bd, 0 };
++                    const bool enc_ok = ggml_metal_sllm_cascadeq_encode(lib, enc, &plan, iq, ik, iv, im, ik8, iv8, idd);
++                    ggml_metal_encoder_end_encoding(enc);
++                    ggml_metal_encoder_free(enc);
++                    if (!enc_ok) {
++                        snprintf(why, why_n, "pipelines for D=%d G=%d rt=%d not available", c.D, G, plan.rt);
++                        ok = false;
++                        break;
++                    }
++                    [cb commit];
++                    [cb waitUntilCompleted];
++                    if ([cb status] != MTLCommandBufferStatusCompleted) {
++                        snprintf(why, why_n, "command buffer failed: %s", [[[cb error] description] UTF8String]);
++                        ok = false;
++                        break;
++                    }
++                    if (rep == 0) {
++                        memcpy(first, d, dst_bytes);
++                    } else if (memcmp(first, d, dst_bytes) != 0) {
++                        snprintf(why, why_n, "not deterministic: D=%d G=%d N=%d, repeat %d differs from the first run", c.D, G, c.N, rep);
++                        ok = false;
++                        break;
++                    } else {
++                        ++n_rep;
++                    }
++                }
++                if (ok) {
++                    double * sc = (double *) malloc((size_t) W*sizeof(double));
++                    double se = 0.0, sr = 0.0, maxerr = 0.0, maxref = 0.0;
++                    bool finite = true;
++                    for (int n = 0; n < c.N; ++n) {
++                        for (int h = 0; h < c.H; ++h) {
++                            const int hk = h/G;
++                            const float * qq = q + ((size_t) n*c.H + h)*c.D;
++                            double mx = -INFINITY;
++                            for (int j = 0; j < W; ++j) {
++                                const float mv = (float) m[(size_t) n*W + j];
++                                if (!(mv > -65504.0f)) { sc[j] = -INFINITY; continue; }
++                                double acc = 0.0;
++                                for (int e = 0; e < c.D; ++e) acc += (double) qq[e]*(double) kf[(size_t) j*rowk + (size_t) hk*c.D + e];
++                                sc[j] = acc/sqrt((double) c.D) + mv;
++                                if (sc[j] > mx) mx = sc[j];
++                            }
++                            double l = 0.0;
++                            for (int j = 0; j < W; ++j) { sc[j] = isinf(sc[j]) ? 0.0 : exp(sc[j] - mx); l += sc[j]; }
++                            for (int e = 0; e < c.D; ++e) {
++                                double acc = 0.0;
++                                for (int j = 0; j < W; ++j) if (sc[j] != 0.0) acc += sc[j]*(double) vf[(size_t) j*rowk + (size_t) hk*c.D + e];
++                                const double ref = acc/l;
++                                const double got = d[((size_t) n*c.H + h)*c.D + e];
++                                if (!isfinite(got)) finite = false;
++                                const double err = fabs(got - ref);
++                                se += err*err; sr += ref*ref;
++                                if (err > maxerr) maxerr = err;
++                                if (fabs(ref) > maxref) maxref = fabs(ref);
++                            }
++                        }
++                    }
++                    free(sc);
++                    const double rel_rms = sr > 0 ? sqrt(se/sr) : 1.0;
++                    const double max_rel = maxref > 0 ? maxerr/maxref : 1.0;
++                    if (max_rel > worst_max) worst_max = max_rel;
++                    if (rel_rms > worst_rms) worst_rms = rel_rms;
++                    ++n_cases;
++                    if (!finite || !(max_rel < 5e-3) || !(rel_rms < 2e-3)) {
++                        snprintf(why, why_n, "mismatch D=%d G=%d N=%d: max_abs/max_ref %.3g, rel_rms %.3g%s",
++                                 c.D, G, c.N, max_rel, rel_rms, finite ? "" : ", non-finite output");
++                        ok = false;
++                    }
++                }
++            }
++            free(kf); free(vf); free(first);
++            [bq release]; [bk release]; [bv release]; [bk8 release]; [bv8 release]; [bm release]; [bd release];
++        }
++        [queue release];
++    }
++
++    g_cq.selftest_cases         = n_cases;
++    g_cq.selftest_repeats       = n_rep;
++    g_cq.selftest_worst_max_rel = worst_max;
++    g_cq.selftest_worst_rel_rms = worst_rms;
++    g_cq.selftest_ms            = (ggml_time_us() - t0)/1e3;
++    return ok;
++}
++
++void ggml_metal_sllm_cascadeq_device_init(ggml_metal_device_t dev, ggml_metal_library_t lib, bool has_tensor) {
++    if (g_cq.initialized) {
++        return;
++    }
++    g_cq.initialized = true;
++    g_cq.active = false;
++    atomic_store(&g_cq.dispatches, 0);
++
++    const char * tr  = getenv("SLLM_CASCADE_TRACE");
++    const char * env = getenv("SLLM_CASCADE");
++    if (env && strcmp(env, "0") == 0) {
++        snprintf(g_cq.reason, sizeof(g_cq.reason), "disabled by SLLM_CASCADE=0");
++    } else if (!has_tensor) {
++        snprintf(g_cq.reason, sizeof(g_cq.reason), "no Metal 4 tensor API on this device");
++    } else if (!lib) {
++        snprintf(g_cq.reason, sizeof(g_cq.reason), "no Metal library");
++    } else {
++        char why[200] = "";
++        g_cq.selftest_ran  = true;
++        g_cq.selftest_pass = sllm_cq_selftest(dev, lib, why, sizeof(why));
++        if (g_cq.selftest_pass) {
++            g_cq.active = true;
++            snprintf(g_cq.reason, sizeof(g_cq.reason), "self-test passed");
++        } else {
++            snprintf(g_cq.reason, sizeof(g_cq.reason), "self-test failed: %s", why);
++        }
++        atomic_store(&g_cq.dispatches, 0);
++    }
++    g_cq.trace = tr && strcmp(tr, "1") == 0;
++
++    if (g_cq.active) {
++        GGML_LOG_INFO("%s: SLLM mixed-precision cascade active (self-test %d cases + %d repeats, worst max/ref %.2e, worst rel rms %.2e, %.1f ms)\n",
++                __func__, g_cq.selftest_cases, g_cq.selftest_repeats, g_cq.selftest_worst_max_rel, g_cq.selftest_worst_rel_rms, g_cq.selftest_ms);
++    } else {
++        GGML_LOG_INFO("%s: SLLM mixed-precision cascade off (%s)\n", __func__, g_cq.reason);
++    }
++}
++
++const char * ggml_backend_metal_sllm_cascadeq_status(void) {
++    static _Thread_local char buf[1024];
++    char reason[300];
++    size_t j = 0;
++    for (size_t i = 0; g_cq.reason[i] && j + 2 < sizeof(reason); ++i) {
++        const char c = g_cq.reason[i];
++        if (c == '"' || c == '\\') reason[j++] = '\\';
++        reason[j++] = (c == '\n' || c == '\r' || c == '\t') ? ' ' : c;
++    }
++    reason[j] = 0;
++    snprintf(buf, sizeof(buf),
++        "{\"patch\":\"sllm-cascadeq-1\",\"initialized\":%s,\"active\":%s,\"reason\":\"%s\","
++        "\"selftest\":{\"ran\":%s,\"pass\":%s,\"cases\":%d,\"repeats\":%d,\"worst_max_rel\":%.3e,\"worst_rel_rms\":%.3e,\"ms\":%.2f},"
++        "\"rule\":\"marked FLASH_ATTN_EXT (op_params[8..11]), f16 K/V + q8_0 src[5]/src[6], D in {128,256}, G in {2,4}, N>=1\",\"dispatches\":%llu}",
++        g_cq.initialized ? "true" : "false", g_cq.active ? "true" : "false", reason,
++        g_cq.selftest_ran ? "true" : "false", g_cq.selftest_pass ? "true" : "false", g_cq.selftest_cases, g_cq.selftest_repeats,
++        g_cq.selftest_worst_max_rel, g_cq.selftest_worst_rel_rms, g_cq.selftest_ms, (unsigned long long) atomic_load(&g_cq.dispatches));
++    return buf;
++}
+--- a/src/ggml-metal/ggml-metal-device.m	2026-10-27 02:21:37
++++ b/src/ggml-metal/ggml-metal-device.m	2026-10-27 02:53:18
+@@ -7,6 +7,7 @@
+ #import "ggml-metal-common.h"
+ #import "ggml-metal-qmm.h"
+ #import "ggml-metal-cascade.h"
++#import "ggml-metal-cascadeq.h"
+ 
+ #include <Foundation/Foundation.h>
+ 
+@@ -1334,6 +1335,8 @@
+                 ggml_metal_sllm_qmm_device_init(dev, dev->library, dev->props.has_tensor);
+                 // SLLM patch: read SLLM_CASCADE and self-test the cascade kernels against a CPU reference
+                 ggml_metal_sllm_cascade_device_init(dev, dev->library, dev->props.has_tensor);
++                // SLLM patch 6: the mixed-precision cascade (q8_0 own pages): its own self-test
++                ggml_metal_sllm_cascadeq_device_init(dev, dev->library, dev->props.has_tensor);
+ 
+                 if (dev->props.use_residency_sets) {
+                     dev->rsets = ggml_metal_rsets_init(dev);
+--- a/src/ggml-metal/ggml-metal-ops.cpp	2026-10-27 02:21:37
++++ b/src/ggml-metal/ggml-metal-ops.cpp	2026-10-27 02:53:18
+@@ -10,6 +10,7 @@
+ #include "ggml-metal-fusion.h"
+ #include "ggml-metal-qmm.h"
+ #include "ggml-metal-cascade.h"
++#include "ggml-metal-cascadeq.h"
+ #include "ggml-metal-tuning.h"
+ 
+ #include <cassert>
+@@ -3434,6 +3435,18 @@
+ 
+     ggml_metal_library_t lib = ctx->lib;
+     ggml_metal_encoder_t enc = ctx->enc;
++
++    // SLLM patch 6: mixed-precision attention (f16 views + q8_0 views in src[5] / src[6]); only this path can run it
++    if (ggml_metal_sllm_cascadeq_marked(op)) {
++        ggml_metal_sllm_cascadeq_plan planq;
++        if (!ggml_metal_sllm_cascadeq_plan_op(op, &planq) ||
++            !ggml_metal_sllm_cascadeq_encode(lib, enc, &planq, ggml_metal_get_buffer_id(op->src[0]), ggml_metal_get_buffer_id(op->src[1]),
++                ggml_metal_get_buffer_id(op->src[2]), ggml_metal_get_buffer_id(op->src[3]), ggml_metal_get_buffer_id(op->src[5]),
++                ggml_metal_get_buffer_id(op->src[6]), ggml_metal_get_buffer_id(op))) {
++            GGML_ABORT("SLLM: mixed-precision attention op %s cannot run (see ggml_backend_metal_sllm_cascadeq_status, SLLM_CASCADE_TRACE=1)", op->name);
++        }
++        return 1;
++    }
+ 
+     // SLLM patch: shared-prefix decode attention (kernels/cascade.metal) for decode groups that sllm-core hinted
+     {
+--- a/src/ggml-metal/ggml-metal.cpp	2026-10-27 02:21:37
++++ b/src/ggml-metal/ggml-metal.cpp	2026-10-27 02:53:18
+@@ -10,6 +10,7 @@
+ #include "ggml-metal-tuning.h"
+ #include "ggml-metal-qmm.h"
+ #include "ggml-metal-cascade.h"
++#include "ggml-metal-cascadeq.h"
+ 
+ #include <mutex>
+ #include <string>
+@@ -244,6 +245,8 @@
+                 res += ggml_metal_op_flash_attn_ext_extra_idx(tensor);
+                 // SLLM patch: scratch of the cascade path (block lists, half Q, partials)
+                 res += ggml_metal_sllm_cascade_extra(tensor);
++                // SLLM patch 6: scratch of the mixed-precision cascade
++                res += ggml_metal_sllm_cascadeq_extra(tensor);
+             } break;
+         case GGML_OP_CUMSUM:
+         case GGML_OP_ARGSORT:
+--- a/src/ggml-metal/kernels/cascade.metal	2026-10-27 02:21:37
++++ b/src/ggml-metal/kernels/cascade.metal	2026-10-27 02:53:18
+@@ -495,4 +495,184 @@
+ SLLM_CASCADE_FUSED(256, 16, 64, 4) SLLM_CASCADE_FUSED(256, 32, 64, 4)
+ SLLM_CASCADE_MERGE(128) SLLM_CASCADE_MERGE(256)
+ 
++// ---------------------------------------------------------------------------------------------------------------
++// SLLM patch 6 (kvmixed): the suffix pass over q8_0 own pages. A mixed-precision decode group keeps the shared prefix
++// (and each agent's partly filled tail page) in the f16 K/V view of the op and its full own pages in q8_0 K/V views
++// (src[5] / src[6]); the mask covers [f16 view cells | q8_0 view cells]. ggml-metal-cascadeq.m runs the f16 part
++// through the cascade kernels above and this kernel over the q8_0 cells; the merge kernel combines both.
++//
++// kernel_sllm_cascade_suffixq8: one threadgroup per (KV head, agent), 4 simdgroups, over the agent's q8_0 block list
++// (from kernel_sllm_cascade_scan run on the q8_0 part of the mask with p0 = p1 = 0). The arithmetic is the f16 suffix
++// pass's (one lane per cell for Q.K over all G heads, simdgroup-wide V rows); only the loads differ. Strides in `a`:
++// nb11 / nb12 / nb21 / nb22 are the q8_0 views' cell and head strides (bytes), ne11 the q8_0 cells, mask points at the
++// first q8_0 column, and the partial goes to slot a.S. a.pad0 bit 0: the q8_0 keys hold H k, H the orthonormal
++// Sylvester-Hadamard matrix of size D (llama.cpp's attention rotation for quantised keys, D034); since
++// q . k = (H q) . (H k), the kernel rotates its queries. From the standalone spike bench/phase2-suffixq8/suffixq.metal.
++
++struct sllm_block_q8 { half d; int8_t qs[32]; };
++
++// 4 bytes at a 2-byte aligned address (q8_0 block payloads start at offset 2)
++static inline uint sllm_q8_ld4(device const uchar * p) {
++    device const ushort * u = (device const ushort *) p;
++    return (uint) u[0] | ((uint) u[1] << 16);
++}
++
++template <int D, int G, int NS>
++kernel void kernel_sllm_cascade_suffixq8(
++        constant sllm_cascade_args & a [[buffer(0)]],
++        device const char  * q     [[buffer(1)]],
++        device const char  * k     [[buffer(2)]],
++        device const char  * v     [[buffer(3)]],
++        device const char  * mask  [[buffer(4)]],
++        device       float * po    [[buffer(5)]],
++        device       float * pml   [[buffer(6)]],
++        device const int   * lists [[buffer(7)]],
++        device const int   * cnt   [[buffer(8)]],
++        threadgroup  float * shm   [[threadgroup(0)]],
++        uint   tgi [[threadgroup_position_in_grid]],
++        ushort tid [[thread_index_in_threadgroup]],
++        ushort sgi [[simdgroup_index_in_threadgroup]],
++        ushort tii [[thread_index_in_simdgroup]]) {
++    constexpr int DL = D / 32;
++    const int hk = tgi % a.HKV, n = tgi / a.HKV;
++    threadgroup float * sq = shm;                 // [G][D]
++    threadgroup float * sm = sq + G * D;          // [NS][G][2 + D]
++    for (int e = tid; e < G * D; e += NS * 32) {
++        const int g = e / D, d = e % D;
++        sq[e] = *((device const float *) (q + (uint64_t) n * a.nb01 + (uint64_t) (hk * G + g) * a.nb02) + d);
++    }
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++    if (a.pad0 & 1) {
++        // fast Walsh-Hadamard transform of each query row (Sylvester order), then the 1/sqrt(D) of the orthonormal H
++        for (int h = 1; h < D; h <<= 1) {
++            for (int e = tid; e < G * D / 2; e += NS * 32) {
++                const int g = e / (D / 2), t = e % (D / 2);
++                const int i = g * D + (t / h) * 2 * h + (t % h);
++                const float x = sq[i], y = sq[i + h];
++                sq[i] = x + y; sq[i + h] = x - y;
++            }
++            threadgroup_barrier(mem_flags::mem_threadgroup);
++        }
++        const float rs = rsqrt((float) D);
++        for (int e = tid; e < G * D; e += NS * 32) sq[e] *= rs;
++        threadgroup_barrier(mem_flags::mem_threadgroup);
++    }
++    threadgroup const float4 * q4 = (threadgroup const float4 *) sq;
++
++    float M[G], L[G], o[G][DL];
++    #pragma unroll
++    for (int g = 0; g < G; ++g) {
++        M[g] = SLLM_NEG; L[g] = 0.0f;
++        #pragma unroll
++        for (int i = 0; i < DL; ++i) o[g][i] = 0.0f;
++    }
++    device const half * mrow = (device const half *) (mask + (uint64_t) n * a.nb31);
++    device const int * lst = lists + (uint64_t) n * a.nblk;
++    const int nb = cnt[n];
++    device const char * kb = k + (uint64_t) hk * a.nb12;
++    device const char * vb = v + (uint64_t) hk * a.nb22;
++    const int d0 = tii * DL;                      // this lane's V dims (all inside one 32-value block)
++    for (int j = sgi; j < nb; j += NS) {
++        const int c0 = lst[j];
++        const int cell = c0 + tii;
++        const float mval = cell < a.ne11 ? (float) mrow[cell] : -INFINITY;
++        const bool fin = mval > -MAXHALF;
++        float x[G];
++        #pragma unroll
++        for (int g = 0; g < G; ++g) x[g] = -INFINITY;
++        if (fin) {
++            device const sllm_block_q8 * kr = (device const sllm_block_q8 *) (kb + (uint64_t) cell * a.nb11);
++            float acc[G];
++            #pragma unroll
++            for (int g = 0; g < G; ++g) acc[g] = 0.0f;
++            for (int b = 0; b < D / 32; ++b) {
++                device const uchar * qs = (device const uchar *) kr[b].qs;
++                float part[G];
++                #pragma unroll
++                for (int g = 0; g < G; ++g) part[g] = 0.0f;
++                #pragma unroll
++                for (int i = 0; i < 8; ++i) {
++                    const float4 kk = (float4) as_type<char4>(sllm_q8_ld4(qs + 4 * i));
++                    #pragma unroll
++                    for (int g = 0; g < G; ++g) part[g] += dot(kk, q4[g * (D / 4) + b * 8 + i]);
++                }
++                const float dk = (float) kr[b].d;
++                #pragma unroll
++                for (int g = 0; g < G; ++g) acc[g] += dk * part[g];
++            }
++            #pragma unroll
++            for (int g = 0; g < G; ++g) x[g] = acc[g] * a.scale + mval;
++        }
++        float p[G];
++        #pragma unroll
++        for (int g = 0; g < G; ++g) {
++            const float Mn = max(M[g], simd_max(x[g]));
++            const float ms = exp(M[g] - Mn);
++            p[g] = exp(x[g] - Mn);
++            L[g] = L[g] * ms + simd_sum(p[g]);
++            M[g] = Mn;
++            #pragma unroll
++            for (int i = 0; i < DL; ++i) o[g][i] *= ms;
++        }
++        const uint vis = (uint) ((simd_vote::vote_t) simd_ballot(fin));
++        for (int jj = 0; jj < 32; ++jj) {
++            if (!(vis & (1u << jj))) continue;
++            device const sllm_block_q8 * vr = (device const sllm_block_q8 *) (vb + (uint64_t) (c0 + jj) * a.nb21) + d0 / 32;
++            const float dv = (float) vr->d;
++            device const uchar * qs = (device const uchar *) vr->qs + d0 % 32;
++            float vv[DL];
++            #pragma unroll
++            for (int i = 0; i < DL; i += 4) {
++                const float4 t = (float4) as_type<char4>(sllm_q8_ld4(qs + i)) * dv;
++                vv[i] = t[0]; vv[i + 1] = t[1]; vv[i + 2] = t[2]; vv[i + 3] = t[3];
++            }
++            #pragma unroll
++            for (int g = 0; g < G; ++g) {
++                const float pj = simd_shuffle(p[g], jj);
++                #pragma unroll
++                for (int i = 0; i < DL; ++i) o[g][i] += pj * vv[i];
++            }
++        }
++    }
++    #pragma unroll
++    for (int g = 0; g < G; ++g) {
++        threadgroup float * e = sm + (sgi * G + g) * (2 + D);
++        if (tii == 0) { e[0] = M[g]; e[1] = L[g]; }
++        #pragma unroll
++        for (int i = 0; i < DL; ++i) e[2 + tii * DL + i] = o[g][i];
++    }
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++    // merge the NS simdgroup partials into slot S
++    for (int g = sgi; g < G; g += NS) {
++        const int r = n * G + g;
++        float Mm = SLLM_NEG, Lm = 0.0f, om[DL];
++        #pragma unroll
++        for (int i = 0; i < DL; ++i) om[i] = 0.0f;
++        for (int t = 0; t < NS; ++t) {
++            threadgroup const float * es = sm + (t * G + g) * (2 + D);
++            const float mt = es[0], lt = es[1];
++            if (!(lt > 0.0f)) continue;
++            const float Mn = max(Mm, mt);
++            const float e1 = exp(Mm - Mn), e2 = exp(mt - Mn);
++            #pragma unroll
++            for (int i = 0; i < DL; ++i) om[i] = om[i] * e1 + es[2 + tii * DL + i] * e2;
++            Lm = Lm * e1 + lt * e2;
++            Mm = Mn;
++        }
++        device float * pr = po + (((uint64_t) a.S * a.HKV + hk) * a.Rpad + r) * D + tii * DL;
++        #pragma unroll
++        for (int i = 0; i < DL; ++i) pr[i] = om[i];
++        if (tii == 0) {
++            device float * ml = pml + (((uint64_t) a.S * a.HKV + hk) * a.Rpad + r) * 2;
++            ml[0] = Mm; ml[1] = Lm;
++        }
++    }
++}
++
++#define SLLM_CASCADE_SUFFIXQ8(D, G) \
++    template [[host_name("kernel_sllm_cascade_suffixq8_d" #D "_g" #G)]] kernel void kernel_sllm_cascade_suffixq8<D, G, 4>( \
++        constant sllm_cascade_args &, device const char *, device const char *, device const char *, device const char *, \
++        device float *, device float *, device const int *, device const int *, threadgroup float *, uint, ushort, ushort, ushort);
++SLLM_CASCADE_SUFFIXQ8(128, 2) SLLM_CASCADE_SUFFIXQ8(128, 4) SLLM_CASCADE_SUFFIXQ8(256, 2) SLLM_CASCADE_SUFFIXQ8(256, 4)
++
+ #endif // GGML_METAL_HAS_TENSOR

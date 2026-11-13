@@ -1,0 +1,123 @@
+{
+ "family": "gemma3",
+ "gguf": "gemma-3-4b-it-qat-Q4_0.gguf",
+ "conversation": "tools_no_system",
+ "messages": [
+  {
+   "role": "user",
+   "content": "Search for café docs, limit 3."
+  }
+ ],
+ "tools": [
+  {
+   "type": "function",
+   "function": {
+    "name": "search_docs",
+    "description": "Search the docs, e.g. for “café” — 日本語 ok",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "query": {
+       "type": "string",
+       "description": "free text"
+      },
+      "limit": {
+       "type": "integer"
+      },
+      "filters": {
+       "type": "object",
+       "properties": {
+        "zeta": {
+         "type": "number"
+        },
+        "alpha": {
+         "type": "array",
+         "items": {
+          "type": "string",
+          "enum": [
+           "b",
+           "a",
+           "c"
+          ]
+         }
+        },
+        "mid": {
+         "type": "object",
+         "properties": {
+          "b": {
+           "type": "boolean"
+          },
+          "a": {
+           "type": "string"
+          }
+         }
+        }
+       }
+      }
+     },
+     "required": [
+      "query"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "get_weather",
+    "description": "Weather for a city",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "unit": {
+       "type": "string",
+       "enum": [
+        "celsius",
+        "fahrenheit"
+       ]
+      },
+      "city": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "city"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "ping",
+    "description": "No arguments",
+    "parameters": {
+     "type": "object",
+     "properties": {}
+    }
+   }
+  }
+ ],
+ "prompt": "<start_of_turn>user\nSearch for café docs, limit 3.<end_of_turn>\n<start_of_turn>model\n",
+ "tokens": [
+  2,
+  105,
+  2364,
+  107,
+  8980,
+  573,
+  33443,
+  48949,
+  236764,
+  4576,
+  236743,
+  236800,
+  236761,
+  106,
+  107,
+  105,
+  4368,
+  107
+ ],
+ "server_prompt_tokens": 18
+}

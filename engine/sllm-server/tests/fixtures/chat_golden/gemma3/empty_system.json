@@ -1,0 +1,36 @@
+{
+ "family": "gemma3",
+ "gguf": "gemma-3-4b-it-qat-Q4_0.gguf",
+ "conversation": "empty_system",
+ "messages": [
+  {
+   "role": "system",
+   "content": ""
+  },
+  {
+   "role": "user",
+   "content": "What is 2+2?"
+  }
+ ],
+ "tools": [],
+ "prompt": "<start_of_turn>user\n\n\nWhat is 2+2?<end_of_turn>\n<start_of_turn>model\n",
+ "tokens": [
+  2,
+  105,
+  2364,
+  109,
+  3689,
+  563,
+  236743,
+  236778,
+  236862,
+  236778,
+  236881,
+  106,
+  107,
+  105,
+  4368,
+  107
+ ],
+ "server_prompt_tokens": 16
+}

@@ -1,0 +1,65 @@
+{
+ "family": "phi3",
+ "gguf": "Phi-3.5-mini-instruct-Q4_0.gguf",
+ "conversation": "assistant_tool_calls",
+ "messages": [
+  {
+   "role": "user",
+   "content": "Look up café docs."
+  },
+  {
+   "role": "assistant",
+   "content": null,
+   "tool_calls": [
+    {
+     "id": "call_1",
+     "type": "function",
+     "function": {
+      "name": "search_docs",
+      "arguments": "{\"query\": \"caf\\u00e9 \\u65e5\\u672c\", \"limit\": 3, \"filters\": {\"zeta\": 1.5, \"alpha\": [\"b\", \"a\"], \"mid\": {\"b\": true, \"a\": null}}}"
+     }
+    }
+   ]
+  },
+  {
+   "role": "user",
+   "content": "Thanks, continue."
+  }
+ ],
+ "tools": [],
+ "prompt": "<|user|>\nLook up café docs.<|end|>\n<|assistant|>\n<|end|>\n<|user|>\nThanks, continue.<|end|>\n<|assistant|>\n",
+ "tokens": [
+  32010,
+  29871,
+  13,
+  14959,
+  701,
+  274,
+  28059,
+  10561,
+  29889,
+  32007,
+  29871,
+  13,
+  32001,
+  29871,
+  13,
+  32007,
+  29871,
+  13,
+  32010,
+  29871,
+  13,
+  16894,
+  29892,
+  6773,
+  29889,
+  32007,
+  29871,
+  13,
+  32001,
+  29871,
+  13
+ ],
+ "server_prompt_tokens": 31
+}

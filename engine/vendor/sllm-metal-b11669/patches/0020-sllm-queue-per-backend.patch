@@ -1,0 +1,115 @@
+SLLM patch 0020 (phase 3 helper lane, opt-in): SLLM_METAL_QUEUE_PER_BACKEND=1 gives every Metal backend a command queue of
+its own instead of the device queue shared by all backends of the process (llama.cpp TAG_QUEUE_PER_BACKEND, left
+commented out upstream). Graphs, async copies and events of a backend go to its queue, so the brain and the helper
+submit to two queues. Unset: byte-for-byte the same behaviour (the shared queue). Against llama.cpp b11669 (620d222)
+after patches 0001-0013, applied with patch -p1 in ggml/.
+
+--- a/src/ggml-metal/ggml-metal-context.m
++++ b/src/ggml-metal/ggml-metal-context.m
+@@ -30,6 +30,12 @@
+     ggml_metal_device_t  dev;
+     ggml_metal_library_t lib;
+ 
++    // SLLM patch 0020: the queue this backend's graphs, async copies and events go to. The device's shared queue by
++    // default; with SLLM_METAL_QUEUE_PER_BACKEND=1 a queue of its own (owned), so two backends of one process (the
++    // brain's and the helper's) submit to two queues and the GPU can run their command buffers side by side.
++    id<MTLCommandQueue> queue;
++    bool own_queue;
++
+     ggml_metal_event_t ev_cpy;  // for async copies
+     ggml_metal_event_t ev_sync; // destination completion signal
+ 
+@@ -113,11 +119,20 @@
+         //       the graph encoders and async ops would use the backend queue while the sync ops would use the device queue?
+         //res->queue = [device newCommandQueue]; [TAG_QUEUE_PER_BACKEND]
+         id<MTLCommandQueue> queue = ggml_metal_device_get_queue(dev);
++        {
++            const char * qpb = getenv("SLLM_METAL_QUEUE_PER_BACKEND");
++            if (qpb && atoi(qpb) != 0) {
++                queue = [device newCommandQueue];
++                res->own_queue = true;
++                GGML_LOG_INFO("%s: SLLM: command queue per backend\n", __func__);
++            }
++        }
+         if (queue == nil) {
+             GGML_LOG_ERROR("%s: error: failed to create command queue\n", __func__);
+             free(res);
+             return NULL;
+         }
++        res->queue = queue;
+ 
+         res->dev = dev;
+         res->lib = ggml_metal_device_get_library(dev);
+@@ -245,6 +260,9 @@
+     Block_release(ctx->encode_async);
+ 
+     //[ctx->queue release]; // [TAG_QUEUE_PER_BACKEND]
++    if (ctx->own_queue) {
++        [ctx->queue release];
++    }
+ 
+     dispatch_release(ctx->d_queue);
+ 
+@@ -383,7 +401,7 @@
+ 
+         // queue the copy operation into the queue of the Metal context
+         // this will be queued at the end, after any currently ongoing GPU operations
+-        id<MTLCommandQueue> queue = ggml_metal_device_get_queue(ctx->dev);
++        id<MTLCommandQueue> queue = ctx->queue;
+         id<MTLCommandBuffer> cmd_buf = [queue commandBuffer];
+         id<MTLBlitCommandEncoder> encoder = [cmd_buf blitCommandEncoder];
+ 
+@@ -429,7 +447,7 @@
+ 
+         // queue the copy operation into the queue of the Metal context
+         // this will be queued at the end, after any currently ongoing GPU operations
+-        id<MTLCommandQueue> queue = ggml_metal_device_get_queue(ctx->dev);
++        id<MTLCommandQueue> queue = ctx->queue;
+         id<MTLCommandBuffer> cmd_buf = [queue commandBuffer];
+         id<MTLBlitCommandEncoder> encoder = [cmd_buf blitCommandEncoder];
+ 
+@@ -465,7 +483,7 @@
+             return false;
+         }
+ 
+-        id<MTLCommandQueue> dst_queue = ggml_metal_device_get_queue(ctx_dst->dev);
++        id<MTLCommandQueue> dst_queue = ctx_dst->queue;
+         id<MTLCommandBuffer> sync_cmd_buf = [dst_queue commandBuffer];
+ 
+         ggml_metal_event_encode_signal(ctx_dst->ev_sync, sync_cmd_buf);
+@@ -479,7 +497,7 @@
+ 
+         // queue the copy operation into the Metal context
+         // this will be queued at the end, after any currently ongoing GPU operations
+-        id<MTLCommandQueue> queue = ggml_metal_device_get_queue(ctx_src->dev);
++        id<MTLCommandQueue> queue = ctx_src->queue;
+         id<MTLCommandBuffer> cmd_buf = [queue commandBuffer];
+         ggml_metal_event_encode_wait(ctx_dst->ev_sync, cmd_buf);
+         id<MTLBlitCommandEncoder> encoder = [cmd_buf blitCommandEncoder];
+@@ -590,7 +608,7 @@
+         }
+ 
+         // short-hand
+-        id<MTLCommandQueue> queue = ggml_metal_device_get_queue(ctx->dev);
++        id<MTLCommandQueue> queue = ctx->queue;
+ 
+         // the main thread commits the first few commands immediately
+         // cmd_buf[n_cb]
+@@ -712,7 +730,7 @@
+ 
+ void ggml_metal_event_record(ggml_metal_t ctx, ggml_metal_event_t ev) {
+     @autoreleasepool {
+-        id<MTLCommandQueue> queue = ggml_metal_device_get_queue(ctx->dev);
++        id<MTLCommandQueue> queue = ctx->queue;
+         id<MTLCommandBuffer> cmd_buf = [queue commandBuffer];
+ 
+         ggml_metal_event_encode_signal(ev, cmd_buf);
+@@ -728,7 +746,7 @@
+ 
+ void ggml_metal_event_wait(ggml_metal_t ctx, ggml_metal_event_t ev) {
+     @autoreleasepool {
+-        id<MTLCommandQueue> queue = ggml_metal_device_get_queue(ctx->dev);
++        id<MTLCommandQueue> queue = ctx->queue;
+         id<MTLCommandBuffer> cmd_buf = [queue commandBuffer];
+ 
+         ggml_metal_event_encode_wait(ev, cmd_buf);

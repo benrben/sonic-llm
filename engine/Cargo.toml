@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = ["sllm-core", "llama-ref", "sllm-server"]
+
+[profile.release]
+opt-level = 3
+# Phase 1 task 8, rule 014 A/B (batch-1 decode, depth 512, 5 interleaved reps, quiet machine, greedy 64/64 equal to llama.cpp):
+#   lto = "fat" + codegen-units = 1: qwen3-0.6b-q4 -0.03% (spread 2.3%), gemma-3-4b-it-qat-4bit -0.02% (spread 0.7%)
+#   PGO (profile-generate on both models, profile-use): qwen +0.22% (spread 2.4%), gemma +0.13% (spread 0.4%)
+# Neither beats the spread, so the profile stays plain: decode is GPU bound (host set_inputs/sample are 0-12 us of
+# a 3 ms / 11 ms step). Kernels are prebuilt dylibs (D028), only the Rust side would change.
+# panic = "abort" is not set: sllm-server (tokio/axum) relies on task-level unwinding to survive a handler panic.
+debug = false

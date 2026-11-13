@@ -1,0 +1,58 @@
+--- a/src/ggml-metal/ggml-metal-context.m
++++ b/src/ggml-metal/ggml-metal-context.m
+@@ -11,6 +11,24 @@
+ #import <Foundation/Foundation.h>
+ 
+ #import <Metal/Metal.h>
++
++#include <mach/mach_time.h>
++
++// SLLM profiling (patches-profile/0101): the GPU time of the command buffers of each graph compute, read back on the
++// next synchronize. Times are seconds in the host timebase of MTLCommandBuffer.GPUStartTime (mach_absolute_time).
++// out[0] busy (sum of GPUEndTime - GPUStartTime), out[1] first GPUStartTime, out[2] last GPUEndTime, out[3] command
++// buffers counted, out[4] the host time now. The accumulators reset on every call.
++static double sllm_gpu_busy = 0.0, sllm_gpu_first = 0.0, sllm_gpu_last = 0.0, sllm_gpu_ncb = 0.0;
++static int sllm_gpu_pending = 0;
++static double sllm_host_now(void) {
++    static mach_timebase_info_data_t tb;
++    if (tb.denom == 0) { mach_timebase_info(&tb); }
++    return (double) mach_absolute_time() * tb.numer / tb.denom * 1e-9;
++}
++GGML_BACKEND_API void ggml_backend_metal_sllm_gpu_times(double * out) {
++    out[0] = sllm_gpu_busy; out[1] = sllm_gpu_first; out[2] = sllm_gpu_last; out[3] = sllm_gpu_ncb; out[4] = sllm_host_now();
++    sllm_gpu_busy = sllm_gpu_first = sllm_gpu_last = sllm_gpu_ncb = 0.0;
++}
+ 
+ #undef MIN
+ #undef MAX
+@@ -276,7 +294,22 @@
+                 }
+                 ctx->has_error = true;
+                 return;
++            }
++        }
++    }
++
++    if (sllm_gpu_pending) {
++        sllm_gpu_pending = 0;
++        for (int cb_idx = 0; cb_idx <= ctx->n_cb; ++cb_idx) {
++            id<MTLCommandBuffer> cmd_buf = ctx->cmd_bufs[cb_idx].obj;
++            if (!cmd_buf) {
++                continue;
+             }
++            const double t0 = [cmd_buf GPUStartTime], t1 = [cmd_buf GPUEndTime];
++            sllm_gpu_busy += t1 - t0;
++            if (sllm_gpu_first == 0.0 || t0 < sllm_gpu_first) { sllm_gpu_first = t0; }
++            if (t1 > sllm_gpu_last) { sllm_gpu_last = t1; }
++            sllm_gpu_ncb += 1.0;
+         }
+     }
+ 
+@@ -569,6 +602,7 @@
+ 
+         // remember the command buffer for the next iteration
+         ctx->cmd_buf_last = ctx->cmd_bufs[n_cb].obj;
++        sllm_gpu_pending = 1;
+ 
+         // prepare the rest of the command buffers asynchronously (optional)
+         // cmd_buf[0.. n_cb)

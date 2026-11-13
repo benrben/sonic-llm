@@ -1,0 +1,465 @@
+[
+ {
+  "name": "weather_call",
+  "messages": [
+   {
+    "role": "user",
+    "content": "What's the weather in Paris right now? Use the tool."
+   }
+  ],
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "search_docs",
+     "description": "Search the docs, e.g. for “café” — 日本語 ok",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "query": {
+        "type": "string",
+        "description": "free text"
+       },
+       "limit": {
+        "type": "integer"
+       },
+       "filters": {
+        "type": "object",
+        "properties": {
+         "zeta": {
+          "type": "number"
+         },
+         "alpha": {
+          "type": "array",
+          "items": {
+           "type": "string",
+           "enum": [
+            "b",
+            "a",
+            "c"
+           ]
+          }
+         },
+         "mid": {
+          "type": "object",
+          "properties": {
+           "b": {
+            "type": "boolean"
+           },
+           "a": {
+            "type": "string"
+           }
+          }
+         }
+        }
+       }
+      },
+      "required": [
+       "query"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "get_weather",
+     "description": "Weather for a city",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "unit": {
+        "type": "string",
+        "enum": [
+         "celsius",
+         "fahrenheit"
+        ]
+       },
+       "city": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "city"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "ping",
+     "description": "No arguments",
+     "parameters": {
+      "type": "object",
+      "properties": {}
+     }
+    }
+   }
+  ],
+  "status": 200,
+  "raw": "<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n</function>\n</tool_call>",
+  "finish_reason": "tool_calls",
+  "message": {
+   "content": "",
+   "tool_calls": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "arguments": "{\"city\":\"Paris\"}"
+     },
+     "id": "WwHpK6Pd882XB08SanCOTPqZJFjBe0bK"
+    }
+   ]
+  }
+ },
+ {
+  "name": "search_nested",
+  "messages": [
+   {
+    "role": "system",
+    "content": "You are a helpful assistant."
+   },
+   {
+    "role": "user",
+    "content": "Search the docs for café with limit 3, filters: alpha b and a, zeta 1.5. Use the tool."
+   }
+  ],
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "search_docs",
+     "description": "Search the docs, e.g. for “café” — 日本語 ok",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "query": {
+        "type": "string",
+        "description": "free text"
+       },
+       "limit": {
+        "type": "integer"
+       },
+       "filters": {
+        "type": "object",
+        "properties": {
+         "zeta": {
+          "type": "number"
+         },
+         "alpha": {
+          "type": "array",
+          "items": {
+           "type": "string",
+           "enum": [
+            "b",
+            "a",
+            "c"
+           ]
+          }
+         },
+         "mid": {
+          "type": "object",
+          "properties": {
+           "b": {
+            "type": "boolean"
+           },
+           "a": {
+            "type": "string"
+           }
+          }
+         }
+        }
+       }
+      },
+      "required": [
+       "query"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "get_weather",
+     "description": "Weather for a city",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "unit": {
+        "type": "string",
+        "enum": [
+         "celsius",
+         "fahrenheit"
+        ]
+       },
+       "city": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "city"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "ping",
+     "description": "No arguments",
+     "parameters": {
+      "type": "object",
+      "properties": {}
+     }
+    }
+   }
+  ],
+  "status": 200,
+  "raw": "<tool_call>\n<function=search_docs>\n<parameter=query>\ncafé\n</parameter>\n<parameter=limit>\n3\n</parameter>\n<parameter=filters>\n{\"alpha\": [\"b\"], \"mid\": {\"a\": \"a\"}}\n</parameter>\n<parameter=limit>\n3\n</parameter>\n<parameter=filters>\n{\"alpha\": [\"b\"], \"mid\": {\"a\": \"a\"}}\n</parameter>\n<parameter=filters>\n{\"alpha\": [\"b\"], \"mid\": {\"a\": \"a\"}}\n</parameter>\n<parameter=filters>\n{\"alpha\": [\"b\"], \"mid\": {\"a\": \"a\"}}\n</parameter>\n<parameter=filters>\n{\"alpha\": [\"b\"], \"mid\": {\"a\": \"a\"}}\n</parameter>\n<parameter=filters>\n{\"alpha\": [\"b\"], \"mid\": {\"a\": \"a\"}}\n</parameter>\n",
+  "finish_reason": "length",
+  "message": {
+   "content": "",
+   "tool_calls": [
+    {
+     "type": "function",
+     "function": {
+      "name": "search_docs",
+      "arguments": "{\"query\":\"café\",\"limit\":3,\"filters\":{\"alpha\": [\"b\"], \"mid\": {\"a\": \"a\"}},\"limit\":3,\"filters\":{\"alpha\": [\"b\"], \"mid\": {\"a\": \"a\"}},\"filters\":{\"alpha\": [\"b\"], \"mid\": {\"a\": \"a\"}},\"filters\":{\"alpha\": [\"b\"], \"mid\": {\"a\": \"a\"}},\"filters\":{\"alpha\": [\"b\"], \"mid\": {\"a\": \"a\"}},\"filters\":{\"alpha\": [\"b\"], \"mid\": {\"a\": \"a\"}}"
+     },
+     "id": "6hAXFcfkClfvnYegSLc77Q1J14zSyQhc"
+    }
+   ]
+  }
+ },
+ {
+  "name": "two_calls",
+  "messages": [
+   {
+    "role": "user",
+    "content": "In one go: ping, and the weather in Rome in celsius. Call both tools."
+   }
+  ],
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "search_docs",
+     "description": "Search the docs, e.g. for “café” — 日本語 ok",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "query": {
+        "type": "string",
+        "description": "free text"
+       },
+       "limit": {
+        "type": "integer"
+       },
+       "filters": {
+        "type": "object",
+        "properties": {
+         "zeta": {
+          "type": "number"
+         },
+         "alpha": {
+          "type": "array",
+          "items": {
+           "type": "string",
+           "enum": [
+            "b",
+            "a",
+            "c"
+           ]
+          }
+         },
+         "mid": {
+          "type": "object",
+          "properties": {
+           "b": {
+            "type": "boolean"
+           },
+           "a": {
+            "type": "string"
+           }
+          }
+         }
+        }
+       }
+      },
+      "required": [
+       "query"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "get_weather",
+     "description": "Weather for a city",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "unit": {
+        "type": "string",
+        "enum": [
+         "celsius",
+         "fahrenheit"
+        ]
+       },
+       "city": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "city"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "ping",
+     "description": "No arguments",
+     "parameters": {
+      "type": "object",
+      "properties": {}
+     }
+    }
+   }
+  ],
+  "status": 200,
+  "raw": "<tool_call>\n<function=ping>\n</function>\n</tool_call>\n<tool_call>\n<function=get_weather>\n<parameter=city>\nRome\n</parameter>\n<parameter=unit>\ncelsius\n</parameter>\n</function>\n</tool_call>",
+  "finish_reason": "tool_calls",
+  "message": {
+   "content": "",
+   "tool_calls": [
+    {
+     "type": "function",
+     "function": {
+      "name": "ping",
+      "arguments": "{}"
+     },
+     "id": "sf2qy5CFOjS8jaNF1RBp3DnJkO6meCZ9"
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "arguments": "{\"city\":\"Rome\",\"unit\":\"celsius\"}"
+     },
+     "id": "DPLFrreniLKMJugZCeGHXky5C3bTxQc0"
+    }
+   ]
+  }
+ },
+ {
+  "name": "plain_answer",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Say hello in one short sentence. Do not use any tool."
+   }
+  ],
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "search_docs",
+     "description": "Search the docs, e.g. for “café” — 日本語 ok",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "query": {
+        "type": "string",
+        "description": "free text"
+       },
+       "limit": {
+        "type": "integer"
+       },
+       "filters": {
+        "type": "object",
+        "properties": {
+         "zeta": {
+          "type": "number"
+         },
+         "alpha": {
+          "type": "array",
+          "items": {
+           "type": "string",
+           "enum": [
+            "b",
+            "a",
+            "c"
+           ]
+          }
+         },
+         "mid": {
+          "type": "object",
+          "properties": {
+           "b": {
+            "type": "boolean"
+           },
+           "a": {
+            "type": "string"
+           }
+          }
+         }
+        }
+       }
+      },
+      "required": [
+       "query"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "get_weather",
+     "description": "Weather for a city",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "unit": {
+        "type": "string",
+        "enum": [
+         "celsius",
+         "fahrenheit"
+        ]
+       },
+       "city": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "city"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "ping",
+     "description": "No arguments",
+     "parameters": {
+      "type": "object",
+      "properties": {}
+     }
+    }
+   }
+  ],
+  "status": 200,
+  "raw": "Hello!",
+  "finish_reason": "stop",
+  "message": {
+   "content": "Hello!",
+   "tool_calls": []
+  }
+ }
+]

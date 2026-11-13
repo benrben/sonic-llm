@@ -1,0 +1,430 @@
+[
+ {
+  "name": "weather_call",
+  "messages": [
+   {
+    "role": "user",
+    "content": "What's the weather in Paris right now? Use the tool."
+   }
+  ],
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "search_docs",
+     "description": "Search the docs, e.g. for “café” — 日本語 ok",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "query": {
+        "type": "string",
+        "description": "free text"
+       },
+       "limit": {
+        "type": "integer"
+       },
+       "filters": {
+        "type": "object",
+        "properties": {
+         "zeta": {
+          "type": "number"
+         },
+         "alpha": {
+          "type": "array",
+          "items": {
+           "type": "string",
+           "enum": [
+            "b",
+            "a",
+            "c"
+           ]
+          }
+         },
+         "mid": {
+          "type": "object",
+          "properties": {
+           "b": {
+            "type": "boolean"
+           },
+           "a": {
+            "type": "string"
+           }
+          }
+         }
+        }
+       }
+      },
+      "required": [
+       "query"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "get_weather",
+     "description": "Weather for a city",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "unit": {
+        "type": "string",
+        "enum": [
+         "celsius",
+         "fahrenheit"
+        ]
+       },
+       "city": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "city"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "ping",
+     "description": "No arguments",
+     "parameters": {
+      "type": "object",
+      "properties": {}
+     }
+    }
+   }
+  ],
+  "status": 200,
+  "raw": "I'm sorry for any confusion, but as an AI text-based interface, I don't have real-time capabilities or access to external tools to provide current weather updates. However, I can guide you on how to find out:\n\n1. Visit a weather forecasting website like Weather.com, BBC Weather, or AccuWeather.\n2. Enter \"Paris, France\" into the search bar.\n3. The website will display the current weather conditions in Paris.\n\nAlternatively, you can use a voice-activated assistant like Siri, Google Assistant, or Alexa, and simply ask, \"What's the weather in Paris right now?\"\n\nRemember, weather conditions can change rapidly, so it's always good to check for the most recent information.",
+  "finish_reason": "stop",
+  "message": {
+   "content": "I'm sorry for any confusion, but as an AI text-based interface, I don't have real-time capabilities or access to external tools to provide current weather updates. However, I can guide you on how to find out:\n\n1. Visit a weather forecasting website like Weather.com, BBC Weather, or AccuWeather.\n2. Enter \"Paris, France\" into the search bar.\n3. The website will display the current weather conditions in Paris.\n\nAlternatively, you can use a voice-activated assistant like Siri, Google Assistant, or Alexa, and simply ask, \"What's the weather in Paris right now?\"\n\nRemember, weather conditions can change rapidly, so it's always good to check for the most recent information.",
+   "tool_calls": []
+  }
+ },
+ {
+  "name": "search_nested",
+  "messages": [
+   {
+    "role": "system",
+    "content": "You are a helpful assistant."
+   },
+   {
+    "role": "user",
+    "content": "Search the docs for café with limit 3, filters: alpha b and a, zeta 1.5. Use the tool."
+   }
+  ],
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "search_docs",
+     "description": "Search the docs, e.g. for “café” — 日本語 ok",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "query": {
+        "type": "string",
+        "description": "free text"
+       },
+       "limit": {
+        "type": "integer"
+       },
+       "filters": {
+        "type": "object",
+        "properties": {
+         "zeta": {
+          "type": "number"
+         },
+         "alpha": {
+          "type": "array",
+          "items": {
+           "type": "string",
+           "enum": [
+            "b",
+            "a",
+            "c"
+           ]
+          }
+         },
+         "mid": {
+          "type": "object",
+          "properties": {
+           "b": {
+            "type": "boolean"
+           },
+           "a": {
+            "type": "string"
+           }
+          }
+         }
+        }
+       }
+      },
+      "required": [
+       "query"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "get_weather",
+     "description": "Weather for a city",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "unit": {
+        "type": "string",
+        "enum": [
+         "celsius",
+         "fahrenheit"
+        ]
+       },
+       "city": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "city"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "ping",
+     "description": "No arguments",
+     "parameters": {
+      "type": "object",
+      "properties": {}
+     }
+    }
+   }
+  ],
+  "status": 200,
+  "raw": "I understand you're looking for a café with specific criteria, but as an AI language model, I don't have direct access to external databases or the ability to search the internet. However, I can guide you on how to perform this search yourself.\n\nHere's a step-by-step approach you can take to find a café that meets your criteria:\n\n1. Use a search engine:\n   - Open your preferred search engine (like Google, Bing, or Yahoo).\n   - Type in keywords that match your criteria, for example:\n     \"café near me with filters alpha b and a, zeta 1.5\"\n\n2. Use a specialized café finder website:\n   - Visit a café finder website or app that allows you to set filters.\n   - Enter your location if required.\n   - Set the filters according to your needs:\n     -",
+  "finish_reason": "length",
+  "message": {
+   "content": "I understand you're looking for a café with specific criteria, but as an AI language model, I don't have direct access to external databases or the ability to search the internet. However, I can guide you on how to perform this search yourself.\n\nHere's a step-by-step approach you can take to find a café that meets your criteria:\n\n1. Use a search engine:\n   - Open your preferred search engine (like Google, Bing, or Yahoo).\n   - Type in keywords that match your criteria, for example:\n     \"café near me with filters alpha b and a, zeta 1.5\"\n\n2. Use a specialized café finder website:\n   - Visit a café finder website or app that allows you to set filters.\n   - Enter your location if required.\n   - Set the filters according to your needs:\n     -",
+   "tool_calls": []
+  }
+ },
+ {
+  "name": "two_calls",
+  "messages": [
+   {
+    "role": "user",
+    "content": "In one go: ping, and the weather in Rome in celsius. Call both tools."
+   }
+  ],
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "search_docs",
+     "description": "Search the docs, e.g. for “café” — 日本語 ok",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "query": {
+        "type": "string",
+        "description": "free text"
+       },
+       "limit": {
+        "type": "integer"
+       },
+       "filters": {
+        "type": "object",
+        "properties": {
+         "zeta": {
+          "type": "number"
+         },
+         "alpha": {
+          "type": "array",
+          "items": {
+           "type": "string",
+           "enum": [
+            "b",
+            "a",
+            "c"
+           ]
+          }
+         },
+         "mid": {
+          "type": "object",
+          "properties": {
+           "b": {
+            "type": "boolean"
+           },
+           "a": {
+            "type": "string"
+           }
+          }
+         }
+        }
+       }
+      },
+      "required": [
+       "query"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "get_weather",
+     "description": "Weather for a city",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "unit": {
+        "type": "string",
+        "enum": [
+         "celsius",
+         "fahrenheit"
+        ]
+       },
+       "city": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "city"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "ping",
+     "description": "No arguments",
+     "parameters": {
+      "type": "object",
+      "properties": {}
+     }
+    }
+   }
+  ],
+  "status": 200,
+  "raw": "I'm an AI language model and cannot execute commands or call external tools directly. However, I can guide you on how to perform these actions:\n\n1. To ping Rome:\n\nYou can use the `ping` command in your terminal or command prompt. Here's how you can do it on Windows:\n```cmd\nping Rome\n```\nOr on macOS/Linux:\n```bash\nping Rome\n```\n\n2. To check the weather in Rome in Celsius:\n\nYou can use a weather website like Weather.com or a dedicated weather API like OpenWeatherMap. Here's an example using Python with the `requests` library to fetch weather data from OpenWeatherMap:\n\n```python\nimport requests\n\nAPI_KEY = 'your_openweathermap_api_key'\nCITY_NAME = \"Rome\"\n\nurl = f\"http://api.open",
+  "finish_reason": "length",
+  "message": {
+   "content": "I'm an AI language model and cannot execute commands or call external tools directly. However, I can guide you on how to perform these actions:\n\n1. To ping Rome:\n\nYou can use the `ping` command in your terminal or command prompt. Here's how you can do it on Windows:\n```cmd\nping Rome\n```\nOr on macOS/Linux:\n```bash\nping Rome\n```\n\n2. To check the weather in Rome in Celsius:\n\nYou can use a weather website like Weather.com or a dedicated weather API like OpenWeatherMap. Here's an example using Python with the `requests` library to fetch weather data from OpenWeatherMap:\n\n```python\nimport requests\n\nAPI_KEY = 'your_openweathermap_api_key'\nCITY_NAME = \"Rome\"\n\nurl = f\"http://api.open",
+   "tool_calls": []
+  }
+ },
+ {
+  "name": "plain_answer",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Say hello in one short sentence. Do not use any tool."
+   }
+  ],
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "search_docs",
+     "description": "Search the docs, e.g. for “café” — 日本語 ok",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "query": {
+        "type": "string",
+        "description": "free text"
+       },
+       "limit": {
+        "type": "integer"
+       },
+       "filters": {
+        "type": "object",
+        "properties": {
+         "zeta": {
+          "type": "number"
+         },
+         "alpha": {
+          "type": "array",
+          "items": {
+           "type": "string",
+           "enum": [
+            "b",
+            "a",
+            "c"
+           ]
+          }
+         },
+         "mid": {
+          "type": "object",
+          "properties": {
+           "b": {
+            "type": "boolean"
+           },
+           "a": {
+            "type": "string"
+           }
+          }
+         }
+        }
+       }
+      },
+      "required": [
+       "query"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "get_weather",
+     "description": "Weather for a city",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "unit": {
+        "type": "string",
+        "enum": [
+         "celsius",
+         "fahrenheit"
+        ]
+       },
+       "city": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "city"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "ping",
+     "description": "No arguments",
+     "parameters": {
+      "type": "object",
+      "properties": {}
+     }
+    }
+   }
+  ],
+  "status": 200,
+  "raw": "Hello!",
+  "finish_reason": "stop",
+  "message": {
+   "content": "Hello!",
+   "tool_calls": []
+  }
+ }
+]

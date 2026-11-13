@@ -1,0 +1,47 @@
+{
+ "family": "qwen25",
+ "gguf": "Qwen2.5-7B-Instruct-Q4_0.gguf",
+ "conversation": "user_only",
+ "messages": [
+  {
+   "role": "user",
+   "content": "Hello there"
+  }
+ ],
+ "tools": [],
+ "prompt": "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n<|im_start|>user\nHello there<|im_end|>\n<|im_start|>assistant\n",
+ "tokens": [
+  151644,
+  8948,
+  198,
+  2610,
+  525,
+  1207,
+  16948,
+  11,
+  3465,
+  553,
+  54364,
+  14817,
+  13,
+  1446,
+  525,
+  264,
+  10950,
+  17847,
+  13,
+  151645,
+  198,
+  151644,
+  872,
+  198,
+  9707,
+  1052,
+  151645,
+  198,
+  151644,
+  77091,
+  198
+ ],
+ "server_prompt_tokens": 31
+}

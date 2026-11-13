@@ -1,0 +1,8 @@
+# Machine facts sllm-server's generic model profile needs (src/profile.rs). The key is machdep.cpu.brand_string.
+# bandwidth_gbs is the memory bandwidth the decode roofline divides by: a config value, not a probe. The 291 GB/s of this
+# M5 Pro is the value measured in the earlier results. SLLM_BANDWIDTH_GBS overrides it, SLLM_MACHINE_CONFIG points at
+# another file. A machine with no entry has no roofline (calibration still reports the effective bandwidth it measured).
+schema = 1
+
+[machine."Apple M5 Pro"]
+bandwidth_gbs = 291

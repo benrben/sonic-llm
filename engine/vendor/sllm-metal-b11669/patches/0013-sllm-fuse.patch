@@ -1,0 +1,922 @@
+SLLM patch 13 (phase2-fuse): fused small ops, bitwise the ggml kernels they replace. Four new entries in ggml-metal's
+fusion table (so the graph optimizer keeps them adjacent), their checks, encoders in ggml-metal-ops.cpp and kernels in
+kernels/prefill.metal:
+- RMS_NORM + MUL + ROPE (NEOX): the q head norm and rope in one pass (Qwen3, Gemma-3 q);
+- RMS_NORM + MUL + ROPE (NEOX) + SCALE: the same with the q scale (Gemma-3);
+- RMS_NORM + MUL + ROPE (NEOX) + VIEW + SET_ROWS (f16): the k head norm, rope and cache write in one pass;
+- ADD + RMS_NORM + MUL: a residual add and the next norm (the sum stays an output).
+Each kernel repeats the per-element arithmetic of kernel_rms_norm_mul_f32_4, kernel_rope_neox_f32, the scale unary
+and kernel_set_rows (f32 -> f16) with the norm's reduction structure; the encoders use ggml_metal_op_norm's own
+thread count and fall back to the unfused ops when it does not fit. SLLM_FUSE=0 turns all four off; status export
+ggml_backend_metal_sllm_fuse_status (dispatch count).
+Against llama.cpp b11669 (source tarball 620d222) after patches 0001..0011 (0012 is left to the qmm work), applied with
+patch -p1 in ggml/.
+
+diff -ruN a/src/ggml-metal/ggml-metal-fusion.cpp b/src/ggml-metal/ggml-metal-fusion.cpp
+--- a/src/ggml-metal/ggml-metal-fusion.cpp	2026-10-15 16:48:22
++++ b/src/ggml-metal/ggml-metal-fusion.cpp	2026-10-27 12:57:31
+@@ -706,8 +706,238 @@
+         (add->data == res->data || !ggml_metal_fusion_overlap(add, res));
+ }
+ 
++// ---- SLLM patch 13 (phase2-fuse) -------------------------------------------
++
++#include <atomic>
++#include <cstdio>
++#include <cstdlib>
++
++bool ggml_metal_sllm_fuse_enabled(void) {
++    static const bool on = [] {
++        const char * e = getenv("SLLM_FUSE");
++        return !(e && strcmp(e, "0") == 0);
++    }();
++    return on;
++}
++
++// SLLM_FUSE_MASK (A/B and bisection): bit 0 norm+rope, 1 norm+rope+scale, 2 norm+rope+set_rows, 3 add+norm,
++// 4 norm+add+norm (default all)
++static bool ggml_metal_sllm_fuse_on(ggml_metal_fusion_id id) {
++    static const int mask = [] {
++        const char * e = getenv("SLLM_FUSE_MASK");
++        return e ? atoi(e) : 31;
++    }();
++    if (!ggml_metal_sllm_fuse_enabled()) {
++        return false;
++    }
++    switch (id) {
++        case GGML_METAL_FUSION_SLLM_NORM_ROPE:       return mask & 1;
++        case GGML_METAL_FUSION_SLLM_NORM_ROPE_SCALE: return mask & 2;
++        case GGML_METAL_FUSION_SLLM_NORM_ROPE_ROWS:  return mask & 4;
++        case GGML_METAL_FUSION_SLLM_ADD_NORM:        return mask & 8;
++        case GGML_METAL_FUSION_SLLM_NORM_ADD_NORM:   return mask & 16;
++        default:                                     return false;
++    }
++}
++
++static std::atomic<unsigned long long> g_sllm_fuse_dispatches{0};
++
++unsigned long long ggml_metal_sllm_fuse_dispatches(void) {
++    return g_sllm_fuse_dispatches.load();
++}
++
++void ggml_metal_sllm_fuse_count(void) {
++    g_sllm_fuse_dispatches++;
++}
++
++// exported: the SLLM fusions' status (sllm-core caps: ggml_metal.fuse)
++extern "C" const char * ggml_backend_metal_sllm_fuse_status(void) {
++    static thread_local char buf[512];
++    snprintf(buf, sizeof(buf),
++        "{\"patch\":\"sllm-fuse-1\",\"active\":%s,\"rule\":\"RMS_NORM+MUL+ROPE(neox)[+SCALE|+SET_ROWS f16], ADD+RMS_NORM+MUL, RMS_NORM+MUL+ADD+RMS_NORM+MUL; "
++        "bitwise ggml's kernels; SLLM_FUSE=0 off\",\"dispatches\":%llu}",
++        ggml_metal_sllm_fuse_enabled() ? "true" : "false", (unsigned long long) g_sllm_fuse_dispatches.load());
++    return buf;
++}
++
++// RMS_NORM + MUL + ROPE (NEOX) [+ SCALE | + VIEW + SET_ROWS f16]: the shapes the fused kernel takes (one float4 per thread
++// of a row; the encoder also requires ggml's norm thread count to equal ne00/4)
++static bool ggml_metal_fusion_check_sllm_norm_rope(
++        const ggml_metal_fusion       * fusion,
++        const ggml_tensor * const     * nodes,
++        const ggml_cgraph             * gf,
++        const int                     * node_idxs,
++              int                       idx,
++              ggml_metal_fusion_mode    mode) {
++    GGML_UNUSED(mode);
++
++    if (!ggml_metal_sllm_fuse_on(fusion->id)) {
++        return false;
++    }
++
++    const ggml_tensor * nrm  = nodes[0];
++    const ggml_tensor * mul  = nodes[1];
++    const ggml_tensor * rope = nodes[2];
++    const ggml_tensor * x    = nrm->src[0];
++
++    if (nrm->op != GGML_OP_RMS_NORM || mul->op != GGML_OP_MUL || rope->op != GGML_OP_ROPE) {
++        return false;
++    }
++    if (x->type != GGML_TYPE_F32 || nrm->type != GGML_TYPE_F32 || mul->type != GGML_TYPE_F32 || rope->type != GGML_TYPE_F32) {
++        return false;
++    }
++    const int64_t ne00 = x->ne[0];
++    if (ne00 % 4 != 0 || ne00 > 4096 || x->nb[0] != 4 || x->nb[1] % 16 != 0 || x->nb[2] % 16 != 0 || x->nb[3] % 16 != 0 || x->ne[3] != 1) {
++        return false;
++    }
++    // the MUL: norm output times a weight row as wide as the norm input (broadcast over heads / tokens)
++    const ggml_tensor * w = mul->src[1];
++    if (mul->src[0] != nrm || !w || w->type != GGML_TYPE_F32 || w->ne[0] != ne00 || w->nb[0] != 4 || w->nb[1] % 16 != 0 ||
++        !ggml_are_same_shape(mul, nrm) || x->ne[1] % w->ne[1] != 0 || x->ne[2] % w->ne[2] != 0 || x->ne[3] % w->ne[3] != 0) {
++        return false;
++    }
++    // the ROPE: NEOX, no frequency factors, no offset, one position per token, a contiguous output of the same shape
++    const int32_t * rp = (const int32_t *) rope->op_params;
++    const int n_dims = rp[1], rmode = rp[2], n_offs = rp[15];
++    const ggml_tensor * pos = rope->src[1];
++    if (rope->src[0] != mul || rope->src[2] || rmode != GGML_ROPE_TYPE_NEOX || n_offs != 0 || n_dims <= 0 || n_dims % 2 != 0 ||
++        n_dims > ne00 || !pos || pos->type != GGML_TYPE_I32 || pos->ne[0] != x->ne[2] || !ggml_are_same_shape(rope, mul) ||
++        !ggml_is_contiguous(rope) || !ggml_is_contiguous(mul) || !ggml_is_contiguous(nrm)) {
++        return false;
++    }
++    if (fusion->id == GGML_METAL_FUSION_SLLM_NORM_ROPE_SCALE) {
++        const ggml_tensor * sc = nodes[3];
++        if (sc->op != GGML_OP_SCALE || sc->src[0] != rope || sc->type != GGML_TYPE_F32 || !ggml_are_same_shape(sc, rope) || !ggml_is_contiguous(sc)) {
++            return false;
++        }
++    }
++    if (fusion->id == GGML_METAL_FUSION_SLLM_NORM_ROPE_ROWS) {
++        const ggml_tensor * sr  = nodes[3];
++        const ggml_tensor * src = sr->src[0];
++        const ggml_tensor * ix  = sr->src[1];
++        // set_rows(cache, view_2d(rope, ne00*heads, tokens), idx): every row is one token's heads back to back
++        if (sr->op != GGML_OP_SET_ROWS || !src || src->view_src != rope || src->view_offs != 0 || src->ne[0] != ne00*rope->ne[1] ||
++            src->ne[1] != rope->ne[2] || src->ne[2] != 1 || src->ne[3] != 1 || src->nb[1] != rope->nb[2] ||
++            sr->type != GGML_TYPE_F16 || sr->nb[0] != 2 || sr->ne[0] != src->ne[0] || sr->ne[2] != 1 || sr->ne[3] != 1 ||
++            !ix || (ix->type != GGML_TYPE_I64 && ix->type != GGML_TYPE_I32) || ix->ne[0] != src->ne[1] || ix->ne[1] != 1 ||
++            ix->ne[2] != 1 || ix->ne[3] != 1) {
++            return false;
++        }
++        // the norm, mul and rope outputs are not written: nothing outside the group may read them (the raw group
++        // includes the VIEW between the rope and the set_rows)
++        int raw[5] = { node_idxs[idx], node_idxs[idx + 1], node_idxs[idx + 2], -1, node_idxs[idx + 3] };
++        for (int i = raw[2] + 1; i < raw[4]; ++i) {
++            if (gf->nodes[i] == src) {
++                raw[3] = i;
++            }
++        }
++        if (raw[3] < 0) {
++            return false;
++        }
++        const ggml_op ops[5] = { GGML_OP_RMS_NORM, GGML_OP_MUL, GGML_OP_ROPE, GGML_OP_VIEW, GGML_OP_SET_ROWS };
++        if (!ggml_can_fuse_subgraph_ext(gf, raw, 5, ops, &raw[4], 1)) {
++            return false;
++        }
++    }
++    return true;
++}
++
++// ADD + RMS_NORM + MUL: same-shape f32 addends (no broadcast), the norm of the sum, a weight row as wide as the row
++static bool ggml_metal_fusion_check_sllm_add_norm(
++        const ggml_metal_fusion       * fusion,
++        const ggml_tensor * const     * nodes,
++        const ggml_cgraph             * gf,
++        const int                     * node_idxs,
++              int                       idx,
++              ggml_metal_fusion_mode    mode) {
++    GGML_UNUSED(gf);
++    GGML_UNUSED(node_idxs);
++    GGML_UNUSED(idx);
++    GGML_UNUSED(mode);
++
++    if (!ggml_metal_sllm_fuse_on(fusion->id)) {
++        return false;
++    }
++
++    const ggml_tensor * add = nodes[0];
++    const ggml_tensor * nrm = nodes[1];
++    const ggml_tensor * mul = nodes[2];
++    const ggml_tensor * a = add->src[0];
++    const ggml_tensor * b = add->src[1];
++    if (add->op != GGML_OP_ADD || nrm->op != GGML_OP_RMS_NORM || mul->op != GGML_OP_MUL || nrm->src[0] != add || mul->src[0] != nrm) {
++        return false;
++    }
++    if (!a || !b || a->type != GGML_TYPE_F32 || b->type != GGML_TYPE_F32 || add->type != GGML_TYPE_F32 ||
++        !ggml_are_same_shape(a, add) || !ggml_are_same_shape(b, add)) {
++        return false;
++    }
++    const int64_t ne00 = add->ne[0];
++    if (ne00 % 4 != 0 || a->nb[0] != 4 || b->nb[0] != 4 || add->nb[0] != 4 || mul->nb[0] != 4 ||
++        a->nb[1] % 16 != 0 || b->nb[1] % 16 != 0 || add->nb[1] % 16 != 0 || mul->nb[1] % 16 != 0 ||
++        a->nb[2] % 16 != 0 || b->nb[2] % 16 != 0 || add->nb[2] % 16 != 0 || mul->nb[2] % 16 != 0) {
++        return false;
++    }
++    const ggml_tensor * w = mul->src[1];
++    if (!w || w->type != GGML_TYPE_F32 || w->ne[0] != ne00 || w->nb[0] != 4 || w->nb[1] % 16 != 0 ||
++        add->ne[1] % w->ne[1] != 0 || add->ne[2] % w->ne[2] != 0 || add->ne[3] % w->ne[3] != 0) {
++        return false;
++    }
++    return true;
++}
++
++// RMS_NORM + MUL + ADD + RMS_NORM + MUL: two norms of the same row width with one-row weights, a same-shape residual
++static bool ggml_metal_fusion_check_sllm_norm_add_norm(
++        const ggml_metal_fusion       * fusion,
++        const ggml_tensor * const     * nodes,
++        const ggml_cgraph             * gf,
++        const int                     * node_idxs,
++              int                       idx,
++              ggml_metal_fusion_mode    mode) {
++    GGML_UNUSED(gf);
++    GGML_UNUSED(node_idxs);
++    GGML_UNUSED(idx);
++    GGML_UNUSED(mode);
++
++    if (!ggml_metal_sllm_fuse_on(fusion->id)) {
++        return false;
++    }
++    const ggml_tensor * n1 = nodes[0], * m1 = nodes[1], * ad = nodes[2], * n2 = nodes[3], * m2 = nodes[4];
++    const ggml_tensor * x = n1->src[0];
++    if (n1->op != GGML_OP_RMS_NORM || m1->op != GGML_OP_MUL || ad->op != GGML_OP_ADD || n2->op != GGML_OP_RMS_NORM || m2->op != GGML_OP_MUL) {
++        return false;
++    }
++    if (m1->src[0] != n1 || ad->src[0] != m1 || n2->src[0] != ad || m2->src[0] != n2) {
++        return false;
++    }
++    const int64_t ne00 = x->ne[0];
++    const ggml_tensor * w1 = m1->src[1], * w2 = m2->src[1], * r = ad->src[1];
++    if (!x || !w1 || !w2 || !r || x->type != GGML_TYPE_F32 || ne00 % 4 != 0 || x->nb[0] != 4 || x->nb[1] % 16 != 0 || x->nb[2] % 16 != 0) {
++        return false;
++    }
++    for (const ggml_tensor * w : { w1, w2 }) {
++        if (w->type != GGML_TYPE_F32 || w->ne[0] != ne00 || w->ne[1] != 1 || w->ne[2] != 1 || w->ne[3] != 1 || w->nb[0] != 4) {
++            return false;
++        }
++    }
++    if (r->type != GGML_TYPE_F32 || !ggml_are_same_shape(r, ad) || r->nb[0] != 4 || r->nb[1] % 16 != 0 || r->nb[2] % 16 != 0) {
++        return false;
++    }
++    for (const ggml_tensor * t : { ad, m2 }) {
++        if (t->type != GGML_TYPE_F32 || t->nb[0] != 4 || t->nb[1] % 16 != 0 || t->nb[2] % 16 != 0) {
++            return false;
++        }
++    }
++    return true;
++}
++
+ // ---- patterns ------------------------------------------------------------
+ 
++static const std::vector<ggml_op> ops_sllm_norm_rope       = { GGML_OP_RMS_NORM, GGML_OP_MUL, GGML_OP_ROPE };
++static const std::vector<ggml_op> ops_sllm_norm_rope_scale = { GGML_OP_RMS_NORM, GGML_OP_MUL, GGML_OP_ROPE, GGML_OP_SCALE };
++static const std::vector<ggml_op> ops_sllm_norm_rope_rows  = { GGML_OP_RMS_NORM, GGML_OP_MUL, GGML_OP_ROPE, GGML_OP_VIEW, GGML_OP_SET_ROWS };
++static const std::vector<ggml_op> ops_sllm_add_norm        = { GGML_OP_ADD, GGML_OP_RMS_NORM, GGML_OP_MUL };
++static const std::vector<ggml_op> ops_sllm_norm_add_norm   = { GGML_OP_RMS_NORM, GGML_OP_MUL, GGML_OP_ADD, GGML_OP_RMS_NORM, GGML_OP_MUL };
++
+ static const std::vector<ggml_op> ops_norm_mul         = { GGML_OP_NORM, GGML_OP_MUL };
+ static const std::vector<ggml_op> ops_norm_mul_add     = { GGML_OP_NORM, GGML_OP_MUL, GGML_OP_ADD };
+ static const std::vector<ggml_op> ops_norm_scale       = { GGML_OP_NORM, GGML_OP_SCALE };
+@@ -785,6 +1015,11 @@
+     { GGML_METAL_FUSION_MOE_REDUCE,     ops_moe_reduce_8,           {},     true,  ggml_metal_fusion_check_moe_reduce },
+     { GGML_METAL_FUSION_SSM_CONV_SILU,  ops_ssm_conv_silu,          {},     false, ggml_metal_fusion_check_ssm_conv_silu },
+     { GGML_METAL_FUSION_MUL_MAT_ADD,    ops_mul_mat_add,            {},     false, ggml_metal_fusion_check_mul_mat_add },
++    { GGML_METAL_FUSION_SLLM_NORM_ROPE,       ops_sllm_norm_rope,       {},  false, ggml_metal_fusion_check_sllm_norm_rope },
++    { GGML_METAL_FUSION_SLLM_NORM_ROPE_SCALE, ops_sllm_norm_rope_scale, {},  false, ggml_metal_fusion_check_sllm_norm_rope },
++    { GGML_METAL_FUSION_SLLM_NORM_ROPE_ROWS,  ops_sllm_norm_rope_rows,  {},  true,  ggml_metal_fusion_check_sllm_norm_rope },
++    { GGML_METAL_FUSION_SLLM_ADD_NORM,        ops_sllm_add_norm,        {0}, false, ggml_metal_fusion_check_sllm_add_norm },
++    { GGML_METAL_FUSION_SLLM_NORM_ADD_NORM,   ops_sllm_norm_add_norm,   {2}, false, ggml_metal_fusion_check_sllm_norm_add_norm },
+ };
+ 
+ // ---- alloc deps -----------------------------------------------------------
+diff -ruN a/src/ggml-metal/ggml-metal-fusion.h b/src/ggml-metal/ggml-metal-fusion.h
+--- a/src/ggml-metal/ggml-metal-fusion.h	2026-10-15 16:48:22
++++ b/src/ggml-metal/ggml-metal-fusion.h	2026-10-27 12:57:31
+@@ -43,7 +43,19 @@
+     GGML_METAL_FUSION_MOE_REDUCE,   // MUL + expert VIEWs + ADD chain (MoE output reduction)
+     GGML_METAL_FUSION_SSM_CONV_SILU, // SSM_CONV + UNARY (silu)
+     GGML_METAL_FUSION_MUL_MAT_ADD,  // MUL_MAT + ADD (residual added in the few-row MMA store)
++    // SLLM patch 13 (phase2-fuse), kernels in kernels/prefill.metal; SLLM_FUSE=0 turns them off
++    GGML_METAL_FUSION_SLLM_NORM_ROPE,       // RMS_NORM + MUL + ROPE (NEOX)
++    GGML_METAL_FUSION_SLLM_NORM_ROPE_SCALE, // RMS_NORM + MUL + ROPE (NEOX) + SCALE
++    GGML_METAL_FUSION_SLLM_NORM_ROPE_ROWS,  // RMS_NORM + MUL + ROPE (NEOX) + VIEW + SET_ROWS (f16 cache)
++    GGML_METAL_FUSION_SLLM_ADD_NORM,        // ADD + RMS_NORM + MUL (the sum is an output too)
++    GGML_METAL_FUSION_SLLM_NORM_ADD_NORM,   // RMS_NORM + MUL + ADD + RMS_NORM + MUL (the sum is an output too)
+ } ggml_metal_fusion_id;
++
++// SLLM patch 13: whether the SLLM fusions are enabled (env SLLM_FUSE, read once: unset or "1" on, "0" off)
++bool ggml_metal_sllm_fuse_enabled(void);
++// SLLM patch 13: number of SLLM fused dispatches so far (all patterns), for the status export
++unsigned long long ggml_metal_sllm_fuse_dispatches(void);
++void ggml_metal_sllm_fuse_count(void);
+ 
+ struct ggml_metal_fusion; // defined in ggml-metal-fusion.cpp
+ 
+diff -ruN a/src/ggml-metal/ggml-metal-ops.cpp b/src/ggml-metal/ggml-metal-ops.cpp
+--- a/src/ggml-metal/ggml-metal-ops.cpp	2026-10-27 12:42:40
++++ b/src/ggml-metal/ggml-metal-ops.cpp	2026-10-27 12:57:31
+@@ -4174,6 +4174,223 @@
+     return 1;
+ }
+ 
++// ---- SLLM patch 13 (phase2-fuse): fused small ops (kernels/prefill.metal) ----------------------------------------
++// The kernels repeat the per-element arithmetic and the reduction structure of the ggml kernels they replace, with
++// ggml's own thread count for the norm, so their outputs are bitwise ggml's (sllm results/phase2-fuse checks it end to
++// end). When a condition fails here the ops run unfused (ggml's path), as if the pattern had not matched.
++
++// same layout as sllm_fuse_args in kernels/prefill.metal
++typedef struct {
++    int32_t  ne00, ne00_t, ne01, ne02;
++    uint64_t nb01, nb02, nb03;
++    int32_t  nw1, nw2, nw3, pad0;
++    uint64_t nbw1, nbw2, nbw3;
++    uint64_t nb1, nb2, nb3;
++    float    eps;
++    int32_t  n_dims, n_ctx_orig;
++    float    freq_base, freq_scale, ext_factor, attn_factor, beta_fast, beta_slow;
++    float    scale, bias;
++    uint64_t nbr1, nbi0;
++    int32_t  idx_i64, pad1;
++    uint64_t nbb1, nbb2, nbb3;
++    uint64_t nbs1, nbs2, nbs3;
++    float    eps2;
++    int32_t  pad2;
++} ggml_metal_sllm_fuse_args;
++
++static ggml_metal_pipeline_with_params ggml_metal_sllm_fuse_pipeline(ggml_metal_library_t lib, const char * name) {
++    ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
++    if (!res.pipeline) {
++        res = ggml_metal_library_compile_pipeline(lib, name, name, nullptr);
++    }
++    return res;
++}
++
++// ggml_metal_op_norm's thread count for this norm op fused with n_fuse - 1 ops (its rule, with its pipeline's limit)
++static int ggml_metal_sllm_fuse_norm_nth(ggml_metal_library_t lib, const ggml_tensor * nrm, int ne00_t, int n_fuse = 2) {
++    auto p = ggml_metal_library_get_pipeline_norm(lib, nrm, n_fuse);
++    if (!p.pipeline) {
++        return -1;
++    }
++    const int mx = ggml_metal_pipeline_max_theads_per_threadgroup(p);
++    int nth = 32;
++    while (nth < ne00_t && nth < mx) {
++        nth *= 2;
++    }
++    nth = std::min(nth, mx);
++    nth = std::min(nth, (ne00_t + 31)/32*32);
++    return nth;
++}
++
++static void ggml_metal_sllm_fuse_weight(ggml_metal_sllm_fuse_args & a, const ggml_tensor * w) {
++    a.nw1 = (int32_t) w->ne[1]; a.nw2 = (int32_t) w->ne[2]; a.nw3 = (int32_t) w->ne[3];
++    a.nbw1 = w->nb[1]; a.nbw2 = w->nb[2]; a.nbw3 = w->nb[3];
++}
++
++// RMS_NORM + MUL + ROPE [+ SCALE | + VIEW + SET_ROWS] at idx (n non-empty nodes); returns the nodes consumed, 0 = not taken
++static int ggml_metal_op_sllm_norm_rope(ggml_metal_op_t ctx, int idx, ggml_metal_fusion_id id, int n) {
++    const ggml_tensor * nrm  = ctx->node(idx);
++    const ggml_tensor * mul  = ctx->node(idx + 1);
++    const ggml_tensor * rope = ctx->node(idx + 2);
++    const ggml_tensor * last = ctx->node(idx + n - 1);
++    const ggml_tensor * x    = nrm->src[0];
++
++    const int ne00 = (int) x->ne[0], ne00_t = ne00/4;
++    if (ggml_metal_sllm_fuse_norm_nth(ctx->lib, nrm, ne00_t) != ne00_t) {
++        return 0;
++    }
++    const int mode = id == GGML_METAL_FUSION_SLLM_NORM_ROPE ? 0 : id == GGML_METAL_FUSION_SLLM_NORM_ROPE_SCALE ? 1 : 2;
++    static const char * names[3] = { "kernel_sllm_norm_rope_f32", "kernel_sllm_norm_rope_scale", "kernel_sllm_norm_rope_rows" };
++    auto pipeline = ggml_metal_sllm_fuse_pipeline(ctx->lib, names[mode]);
++    if (!pipeline.pipeline || ggml_metal_pipeline_max_theads_per_threadgroup(pipeline) < ne00_t) {
++        return 0;
++    }
++
++    ggml_metal_sllm_fuse_args a;
++    memset(&a, 0, sizeof(a));
++    a.ne00 = ne00; a.ne00_t = ne00_t; a.ne01 = (int32_t) x->ne[1]; a.ne02 = (int32_t) x->ne[2];
++    a.nb01 = x->nb[1]; a.nb02 = x->nb[2]; a.nb03 = x->nb[3];
++    ggml_metal_sllm_fuse_weight(a, mul->src[1]);
++    memcpy(&a.eps, nrm->op_params, sizeof(float));
++    const int32_t * rp = (const int32_t *) rope->op_params;
++    a.n_dims = rp[1]; a.n_ctx_orig = rp[4];
++    memcpy(&a.freq_base,   rp +  5, sizeof(float));
++    memcpy(&a.freq_scale,  rp +  6, sizeof(float));
++    memcpy(&a.ext_factor,  rp +  7, sizeof(float));
++    memcpy(&a.attn_factor, rp +  8, sizeof(float));
++    memcpy(&a.beta_fast,   rp +  9, sizeof(float));
++    memcpy(&a.beta_slow,   rp + 10, sizeof(float));
++    if (mode == 1) {
++        a.scale = ggml_get_op_params_f32(last, 0);
++        a.bias  = ggml_get_op_params_f32(last, 1);
++    }
++    ggml_metal_buffer_id bid_idx = ggml_metal_get_buffer_id(x);
++    if (mode == 2) {
++        const ggml_tensor * ix = last->src[1];
++        a.nbr1 = last->nb[1]; a.nbi0 = ix->nb[0]; a.idx_i64 = ix->type == GGML_TYPE_I64;
++        bid_idx = ggml_metal_get_buffer_id(ix);
++    } else {
++        a.nb1 = last->nb[1]; a.nb2 = last->nb[2]; a.nb3 = last->nb[3];
++    }
++
++    for (int i = 1; i < n; ++i) {
++        if (!ggml_metal_op_concurrency_check(ctx, ctx->node(idx + i))) {
++            ggml_metal_op_concurrency_reset(ctx);
++            break;
++        }
++    }
++
++    ggml_metal_encoder_t enc = ctx->enc;
++    ggml_metal_encoder_set_pipeline(enc, pipeline);
++    ggml_metal_encoder_set_bytes   (enc, &a, sizeof(a), 0);
++    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(x),            1);
++    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(mul->src[1]),  2);
++    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(rope->src[1]), 3);
++    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(last),         4);
++    ggml_metal_encoder_set_buffer  (enc, bid_idx,                                5);
++    ggml_metal_encoder_set_threadgroup_memory_size(enc, ((size_t) (32 + 2*ne00)*sizeof(float) + 15)/16*16, 0);
++    ggml_metal_encoder_dispatch_threadgroups(enc, x->ne[1], x->ne[2], x->ne[3], ne00_t, 1, 1);
++    ggml_metal_sllm_fuse_count();
++    return n;
++}
++
++// RMS_NORM + MUL + ADD + RMS_NORM + MUL at idx; returns 5, or 0 = not taken
++static int ggml_metal_op_sllm_norm_add_norm(ggml_metal_op_t ctx, int idx) {
++    const ggml_tensor * n1 = ctx->node(idx);
++    const ggml_tensor * m1 = ctx->node(idx + 1);
++    const ggml_tensor * ad = ctx->node(idx + 2);
++    const ggml_tensor * n2 = ctx->node(idx + 3);
++    const ggml_tensor * m2 = ctx->node(idx + 4);
++    const ggml_tensor * x  = n1->src[0];
++
++    const int ne00 = (int) x->ne[0], ne00_t = ne00/4;
++    const int nth  = ggml_metal_sllm_fuse_norm_nth(ctx->lib, n1, ne00_t, 3);
++    const int nth2 = ggml_metal_sllm_fuse_norm_nth(ctx->lib, n2, ne00_t, 2);
++    auto pipeline = ggml_metal_sllm_fuse_pipeline(ctx->lib, "kernel_sllm_norm_add_norm");
++    if (nth <= 0 || nth != nth2 || !pipeline.pipeline || ggml_metal_pipeline_max_theads_per_threadgroup(pipeline) < nth) {
++        return 0;
++    }
++    const ggml_tensor * r = ad->src[1];
++
++    ggml_metal_sllm_fuse_args a;
++    memset(&a, 0, sizeof(a));
++    a.ne00 = ne00; a.ne00_t = ne00_t; a.ne01 = (int32_t) x->ne[1]; a.ne02 = (int32_t) x->ne[2];
++    a.nb01 = x->nb[1]; a.nb02 = x->nb[2]; a.nb03 = x->nb[3];
++    a.nbb1 = r->nb[1]; a.nbb2 = r->nb[2]; a.nbb3 = r->nb[3];
++    a.nbs1 = ad->nb[1]; a.nbs2 = ad->nb[2]; a.nbs3 = ad->nb[3];
++    a.nb1 = m2->nb[1]; a.nb2 = m2->nb[2]; a.nb3 = m2->nb[3];
++    ggml_metal_sllm_fuse_weight(a, m1->src[1]);
++    memcpy(&a.eps,  n1->op_params, sizeof(float));
++    memcpy(&a.eps2, n2->op_params, sizeof(float));
++
++    for (int i = 1; i < 5; ++i) {
++        if (!ggml_metal_op_concurrency_check(ctx, ctx->node(idx + i))) {
++            ggml_metal_op_concurrency_reset(ctx);
++            break;
++        }
++    }
++
++    ggml_metal_encoder_t enc = ctx->enc;
++    ggml_metal_encoder_set_pipeline(enc, pipeline);
++    ggml_metal_encoder_set_bytes   (enc, &a, sizeof(a), 0);
++    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(x),          1);
++    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(m1->src[1]), 2);
++    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(r),          3);
++    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(m2->src[1]), 4);
++    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(ad),         5);
++    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(m2),         6);
++    ggml_metal_encoder_set_threadgroup_memory_size(enc, 32*sizeof(float), 0);
++    ggml_metal_encoder_dispatch_threadgroups(enc, x->ne[1], x->ne[2], x->ne[3], nth, 1, 1);
++    ggml_metal_sllm_fuse_count();
++    return 5;
++}
++
++// ADD + RMS_NORM + MUL at idx; returns 3, or 0 = not taken
++static int ggml_metal_op_sllm_add_norm(ggml_metal_op_t ctx, int idx) {
++    const ggml_tensor * add = ctx->node(idx);
++    const ggml_tensor * nrm = ctx->node(idx + 1);
++    const ggml_tensor * mul = ctx->node(idx + 2);
++
++    const int ne00 = (int) add->ne[0], ne00_t = ne00/4;
++    const int nth = ggml_metal_sllm_fuse_norm_nth(ctx->lib, nrm, ne00_t);
++    auto pipeline = ggml_metal_sllm_fuse_pipeline(ctx->lib, "kernel_sllm_add_norm");
++    if (nth <= 0 || !pipeline.pipeline || ggml_metal_pipeline_max_theads_per_threadgroup(pipeline) < nth) {
++        return 0;
++    }
++    const ggml_tensor * x = add->src[0];
++    const ggml_tensor * b = add->src[1];
++
++    ggml_metal_sllm_fuse_args a;
++    memset(&a, 0, sizeof(a));
++    a.ne00 = ne00; a.ne00_t = ne00_t; a.ne01 = (int32_t) add->ne[1]; a.ne02 = (int32_t) add->ne[2];
++    a.nb01 = x->nb[1]; a.nb02 = x->nb[2]; a.nb03 = x->nb[3];
++    a.nbb1 = b->nb[1]; a.nbb2 = b->nb[2]; a.nbb3 = b->nb[3];
++    a.nbs1 = add->nb[1]; a.nbs2 = add->nb[2]; a.nbs3 = add->nb[3];
++    a.nb1 = mul->nb[1]; a.nb2 = mul->nb[2]; a.nb3 = mul->nb[3];
++    ggml_metal_sllm_fuse_weight(a, mul->src[1]);
++    memcpy(&a.eps, nrm->op_params, sizeof(float));
++
++    for (int i = 1; i < 3; ++i) {
++        if (!ggml_metal_op_concurrency_check(ctx, ctx->node(idx + i))) {
++            ggml_metal_op_concurrency_reset(ctx);
++            break;
++        }
++    }
++
++    ggml_metal_encoder_t enc = ctx->enc;
++    ggml_metal_encoder_set_pipeline(enc, pipeline);
++    ggml_metal_encoder_set_bytes   (enc, &a, sizeof(a), 0);
++    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(x),           1);
++    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(b),           2);
++    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(mul->src[1]), 3);
++    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(add),         4);
++    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(mul),         5);
++    ggml_metal_encoder_set_threadgroup_memory_size(enc, 32*sizeof(float), 0);
++    ggml_metal_encoder_dispatch_threadgroups(enc, add->ne[1], add->ne[2], add->ne[3], nth, 1, 1);
++    ggml_metal_sllm_fuse_count();
++    return 3;
++}
++
+ int ggml_metal_op_bin(ggml_metal_op_t ctx, int idx) {
+     int n_fuse = 1;
+     const ggml_metal_fusion * fusion = nullptr;
+@@ -4196,6 +4413,17 @@
+             ctx->count_fusions(fusion);
+             return ggml_metal_op_moe_reduce(ctx, idx);
+         }
++
++        // SLLM patch 13: residual add + the next norm
++        if (fusion && ggml_metal_fusion_get_id(fusion) == GGML_METAL_FUSION_SLLM_ADD_NORM) {
++            const int r = ggml_metal_op_sllm_add_norm(ctx, idx);
++            if (r > 0) {
++                ctx->count_fusions(fusion);
++                return r;
++            }
++            fusion = nullptr;
++            n_fuse = 1;
++        }
+     }
+ 
+     ggml_tensor * op = ctx->node(idx);
+@@ -4503,6 +4731,27 @@
+     bool fused_norm_scale = false;
+ 
+     ggml_metal_buffer_id bid_fuse[2] = { bid_src0, bid_src0 };
++
++    // SLLM patch 13: q / k head norm + rope [+ scale | + the f16 cache write]
++    if (use_fusion && op->op == GGML_OP_RMS_NORM) {
++        int n = 1;
++        const ggml_metal_fusion * fusion = ctx->can_fuse(idx, GGML_METAL_FUSION_FULL, &n);
++        const ggml_metal_fusion_id fid = fusion ? ggml_metal_fusion_get_id(fusion) : GGML_METAL_FUSION_NONE;
++        if (fid == GGML_METAL_FUSION_SLLM_NORM_ROPE || fid == GGML_METAL_FUSION_SLLM_NORM_ROPE_SCALE || fid == GGML_METAL_FUSION_SLLM_NORM_ROPE_ROWS) {
++            const int r = ggml_metal_op_sllm_norm_rope(ctx, idx, fid, n);
++            if (r > 0) {
++                ctx->count_fusions(fusion);
++                return r;
++            }
++        }
++        if (fid == GGML_METAL_FUSION_SLLM_NORM_ADD_NORM) {
++            const int r = ggml_metal_op_sllm_norm_add_norm(ctx, idx);
++            if (r > 0) {
++                ctx->count_fusions(fusion);
++                return r;
++            }
++        }
++    }
+ 
+     // d[0] = norm(a)
+     // d[1] = mul(d[0], b) or scale(d[0])
+diff -ruN a/src/ggml-metal/kernels/prefill.metal b/src/ggml-metal/kernels/prefill.metal
+--- a/src/ggml-metal/kernels/prefill.metal	2026-10-27 12:42:40
++++ b/src/ggml-metal/kernels/prefill.metal	2026-10-27 12:56:47
+@@ -450,3 +450,354 @@
+ SLLM_PFA2(256, 32, 4, 2) SLLM_PFA2(256, 32, 4, 4)
+ 
+ #endif // GGML_METAL_HAS_TENSOR
++
++// ---------------------------------------------------------------------------------------------------------------------
++// SLLM patch 13 (phase2-fuse): fused small ops, each bitwise the ggml kernels it replaces (same per-element arithmetic,
++// same reduction structure; ggml-metal-ops.cpp dispatches them with ggml's own thread counts):
++//   kernel_sllm_norm_rope_*  RMS_NORM + MUL (kernel_rms_norm_mul_f32_4) + ROPE NEOX (kernel_rope_neox_f32), then
++//                            mode 0: f32 out; mode 1: + SCALE (kernel_unary_f32_f32_4 scale: scale*x + bias);
++//                            mode 2: + SET_ROWS into an f16 cache row (kernel_set_rows_f16: (half) x)
++//   kernel_sllm_add_norm     ADD (both outputs kept) + RMS_NORM + MUL
++// One threadgroup per row (head of a token, or hidden row); thread t holds float4 t of the row.
++
++typedef struct {
++    int32_t  ne00;     // row width (floats), a multiple of 4
++    int32_t  ne00_t;   // ne00 / 4 (= threads of the norm)
++    int32_t  ne01, ne02;
++    uint64_t nb01, nb02, nb03;        // x row strides (bytes)
++    int32_t  nw1, nw2, nw3, pad0;     // weight broadcast extents
++    uint64_t nbw1, nbw2, nbw3;        // weight strides
++    uint64_t nb1, nb2, nb3;           // dst strides (f32 out; mode 2: unused)
++    float    eps;
++    // rope
++    int32_t  n_dims, n_ctx_orig;
++    float    freq_base, freq_scale, ext_factor, attn_factor, beta_fast, beta_slow;
++    // scale (mode 1)
++    float    scale, bias;
++    // set_rows (mode 2): dst cell stride (bytes), index stride (bytes), index type i64 (1) or i32 (0)
++    uint64_t nbr1, nbi0;
++    int32_t  idx_i64, pad1;
++    // add_norm: second addend strides and the sum's strides
++    uint64_t nbb1, nbb2, nbb3;
++    uint64_t nbs1, nbs2, nbs3;
++    float    eps2;     // norm_add_norm: the second norm's eps
++    int32_t  pad2;
++} sllm_fuse_args;
++
++static float sllm_rope_yarn_ramp(const float low, const float high, const int i0) {
++    const float y = (i0 / 2 - low) / max(0.001f, high - low);
++    return 1.0f - min(1.0f, max(0.0f, y));
++}
++
++static void sllm_rope_yarn(
++    float theta_extrap, float freq_scale, float corr_dims[2], int i0, float ext_factor, float mscale,
++    thread float * cos_theta, thread float * sin_theta) {
++    float theta_interp = freq_scale * theta_extrap;
++    float theta = theta_interp;
++    if (ext_factor != 0.0f) {
++        float ramp_mix = sllm_rope_yarn_ramp(corr_dims[0], corr_dims[1], i0) * ext_factor;
++        theta = theta_interp * (1 - ramp_mix) + theta_extrap * ramp_mix;
++        mscale *= 1.0f + 0.1f * log(1.0f / freq_scale);
++    }
++    *cos_theta = cos(theta) * mscale;
++    *sin_theta = sin(theta) * mscale;
++}
++
++static float sllm_rope_yarn_corr_factor(int n_dims, int n_ctx_orig, float n_rot, float base) {
++    return n_dims * log(n_ctx_orig / (n_rot * 2 * M_PI_F)) / (2 * log(base));
++}
++
++static void sllm_rope_yarn_corr_dims(
++    int n_dims, int n_ctx_orig, float freq_base, float beta_fast, float beta_slow, float dims[2]
++) {
++    dims[0] = max(0.0f,         floor(sllm_rope_yarn_corr_factor(n_dims, n_ctx_orig, beta_fast, freq_base)));
++    dims[1] = min(n_dims - 1.0f, ceil(sllm_rope_yarn_corr_factor(n_dims, n_ctx_orig, beta_slow, freq_base)));
++}
++
++// grid (ne01, ne02, ne03) = (heads, tokens, 1), ne00_t threads; shmem: 32 floats + 2 x ne00 floats.
++// The norm and the rope are ggml's code (kernel_rms_norm_fuse_impl<float4, 2>, kernel_rope_neox<float>) with the same
++// loops, so the compiler emits the same arithmetic (a folded "0 + dot" or a different fma contraction would change
++// the last bit); only their outputs go to threadgroup memory instead of device memory.
++template <int MODE>
++kernel void kernel_sllm_norm_rope(
++        constant sllm_fuse_args & args,
++        device const char * src0,     // x f32 [ne00, ne01, ne02]
++        device const char * src1_0,   // norm weight
++        device const char * src1,     // i32 positions [ne02]
++        device       char * dst,      // mode 0/1: f32 out; mode 2: the f16 cache
++        device const char * idx,      // mode 2: cell of each token
++        threadgroup float * shmem_f32 [[threadgroup(0)]],
++        uint3   tgpig[[threadgroup_position_in_grid]],
++        ushort3 tpitg[[thread_position_in_threadgroup]],
++        ushort  sgitg[[simdgroup_index_in_threadgroup]],
++        ushort  tiisg[[thread_index_in_simdgroup]],
++        ushort3   ntg[[threads_per_threadgroup]]) {
++    typedef float4 T;
++
++    if (sgitg == 0) {
++        shmem_f32[tiisg] = 0.0f;
++    }
++
++    const int i01 = tgpig.x;
++    const int i02 = tgpig.y;
++    const int i03 = tgpig.z;
++
++    device const T * x = (device const T *) (src0 + i03*args.nb03 + i02*args.nb02 + i01*args.nb01);
++
++    device const T * f0 = (device const T *) (src1_0 + (i03%args.nw3)*args.nbw3 + (i02%args.nw2)*args.nbw2 + (i01%args.nw1)*args.nbw1);
++
++    float sumf = 0.0f;
++
++    // parallel sum
++    for (int i00 = tpitg.x; i00 < args.ne00_t; i00 += ntg.x) {
++        sumf += dot(x[i00], x[i00]);
++    }
++    sumf = simd_sum(sumf);
++
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++
++    if (tiisg == 0) {
++        shmem_f32[sgitg] = sumf;
++    }
++
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++
++    sumf = shmem_f32[tiisg];
++    sumf = simd_sum(sumf);
++
++    const float mean  = sumf/args.ne00;
++    const float scale = 1.0f/sqrt(mean + args.eps);
++
++    threadgroup T * y = (threadgroup T *) (shmem_f32 + 32);
++    for (int i00 = tpitg.x; i00 < args.ne00_t; i00 += ntg.x) {
++        y[i00] = (x[i00]*scale)*f0[i00];
++    }
++
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++
++    // rope (NEOX), from the normalized row in threadgroup memory
++    threadgroup const float * src_row = shmem_f32 + 32;
++    threadgroup       float * rot     = shmem_f32 + 32 + args.ne00;
++    device float * out_row = (device float *) (dst + i03*args.nb3 + i02*args.nb2 + i01*args.nb1);
++
++    float corr_dims[2];
++    sllm_rope_yarn_corr_dims(args.n_dims, args.n_ctx_orig, args.freq_base, args.beta_fast, args.beta_slow, corr_dims);
++
++    device const int32_t * pos = (device const int32_t *) src1;
++
++    const float theta_base = (float) pos[i02];
++    const float inv_ndims = -1.f/args.n_dims;
++
++    float cos_theta;
++    float sin_theta;
++
++    for (int i0 = 2*tpitg.x; i0 < args.ne00; i0 += 2*ntg.x) {
++        if (i0 < args.n_dims) {
++            const int iw = i0;
++            const int ic = iw/2;
++
++            const float theta = theta_base * pow(args.freq_base, inv_ndims*iw);
++
++            const float freq_factor = 1.0f;
++
++            sllm_rope_yarn(theta/freq_factor, args.freq_scale, corr_dims, iw, args.ext_factor, args.attn_factor, &cos_theta, &sin_theta);
++
++            threadgroup const float * const s = src_row + ic;
++
++            const float x0 = s[0];
++            const float x1 = s[args.n_dims/2];
++
++            if (MODE == 0) {
++                device float * d = out_row + ic;
++                d[0]             = fma(x0, cos_theta, -(x1*sin_theta));
++                d[args.n_dims/2] = fma(x1, cos_theta, x0*sin_theta);
++            } else {
++                threadgroup float * d = rot + ic;
++                d[0]             = fma(x0, cos_theta, -(x1*sin_theta));
++                d[args.n_dims/2] = fma(x1, cos_theta, x0*sin_theta);
++            }
++        } else {
++            if (MODE == 0) {
++                out_row[i0]     = src_row[i0];
++                out_row[i0 + 1] = src_row[i0 + 1];
++            } else {
++                rot[i0]     = src_row[i0];
++                rot[i0 + 1] = src_row[i0 + 1];
++            }
++        }
++    }
++
++    if (MODE == 0) {
++        return;
++    }
++
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++
++    const T r = ((threadgroup const T *) rot)[tpitg.x];
++    if (MODE == 1) {
++        // kernel_unary_impl<float4, float4, float4>, OP_UNARY_NUM_SCALE
++        const T xs = (T) r;
++        ((device T *) out_row)[tpitg.x] = (T) (args.scale * xs + args.bias);
++    }
++    if (MODE == 2) {
++        // kernel_set_rows_f: dst_row[ind] = (TD) src_row[ind]
++        const int64_t cell = args.idx_i64 ? ((device const int64_t *) (idx + i02*args.nbi0))[0]
++                                          : (int64_t) ((device const int32_t *) (idx + i02*args.nbi0))[0];
++        device half4 * d = (device half4 *) (dst + cell*args.nbr1 + (uint64_t) i01*args.ne00*2);
++        d[tpitg.x] = (half4) r;
++    }
++}
++
++typedef decltype(kernel_sllm_norm_rope<0>) kernel_sllm_norm_rope_t;
++template [[host_name("kernel_sllm_norm_rope_f32")]]   kernel kernel_sllm_norm_rope_t kernel_sllm_norm_rope<0>;
++template [[host_name("kernel_sllm_norm_rope_scale")]] kernel kernel_sllm_norm_rope_t kernel_sllm_norm_rope<1>;
++template [[host_name("kernel_sllm_norm_rope_rows")]]  kernel kernel_sllm_norm_rope_t kernel_sllm_norm_rope<2>;
++
++// ADD + RMS_NORM + MUL: s = a + b (written), y = (s*scale)*w (written); nth threads per row as ggml's norm picks them
++kernel void kernel_sllm_add_norm(
++        constant sllm_fuse_args & args,
++        device const char * srca,
++        device const char * srcb,
++        device const char * srcw,
++        device       char * sum,
++        device       char * dst,
++        threadgroup float * shmem_f32 [[threadgroup(0)]],
++        uint3   tgpig[[threadgroup_position_in_grid]],
++        ushort3 tpitg[[thread_position_in_threadgroup]],
++        ushort  sgitg[[simdgroup_index_in_threadgroup]],
++        ushort  tiisg[[thread_index_in_simdgroup]],
++        ushort3   ntg[[threads_per_threadgroup]]) {
++    if (sgitg == 0) {
++        shmem_f32[tiisg] = 0.0f;
++    }
++
++    const int i01 = tgpig.x;
++    const int i02 = tgpig.y;
++    const int i03 = tgpig.z;
++
++    device const float4 * a  = (device const float4 *) (srca + i03*args.nb03 + i02*args.nb02 + i01*args.nb01);
++    device const float4 * b  = (device const float4 *) (srcb + i03*args.nbb3 + i02*args.nbb2 + i01*args.nbb1);
++    device       float4 * s  = (device       float4 *) (sum  + i03*args.nbs3 + i02*args.nbs2 + i01*args.nbs1);
++    device const float4 * f0 = (device const float4 *) (srcw + (i03%args.nw3)*args.nbw3 + (i02%args.nw2)*args.nbw2 + (i01%args.nw1)*args.nbw1);
++    device       float4 * y  = (device       float4 *) (dst  + i03*args.nb3  + i02*args.nb2  + i01*args.nb1);
++
++    float sumf = 0.0f;
++    for (int i00 = tpitg.x; i00 < args.ne00_t; i00 += ntg.x) {
++        const float4 v = a[i00] + b[i00];
++        s[i00] = v;
++        sumf += dot(v, v);
++    }
++    sumf = simd_sum(sumf);
++
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++
++    if (tiisg == 0) {
++        shmem_f32[sgitg] = sumf;
++    }
++
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++
++    sumf = shmem_f32[tiisg];
++    sumf = simd_sum(sumf);
++
++    const float mean  = sumf/args.ne00;
++    const float scale = 1.0f/sqrt(mean + args.eps);
++
++    for (int i00 = tpitg.x; i00 < args.ne00_t; i00 += ntg.x) {
++        y[i00] = (s[i00]*scale)*f0[i00];
++    }
++}
++
++// RMS_NORM + MUL + ADD (kernel_rms_norm_fuse_impl<float4, 3>), then RMS_NORM + MUL (kernel_rms_norm_fuse_impl<float4, 2>)
++// of that sum, in one pass (Gemma-3: a post-norm with its residual add, then the next pre-norm). Both are ggml's code
++// with ggml's loops; the sum is written (an output) and re-read by the same threads for the second norm.
++kernel void kernel_sllm_norm_add_norm(
++        constant sllm_fuse_args & args,
++        device const char * src0,     // x
++        device const char * src1_0,   // first weight
++        device const char * src1_1,   // the residual
++        device const char * src2_0,   // second weight
++        device       char * sum,      // first norm * w + residual
++        device       char * dst,      // second norm * w
++        threadgroup float * shmem_f32 [[threadgroup(0)]],
++        uint3   tgpig[[threadgroup_position_in_grid]],
++        ushort3 tpitg[[thread_position_in_threadgroup]],
++        ushort  sgitg[[simdgroup_index_in_threadgroup]],
++        ushort  tiisg[[thread_index_in_simdgroup]],
++        ushort3   ntg[[threads_per_threadgroup]]) {
++    typedef float4 T;
++
++    if (sgitg == 0) {
++        shmem_f32[tiisg] = 0.0f;
++    }
++
++    const int i01 = tgpig.x;
++    const int i02 = tgpig.y;
++    const int i03 = tgpig.z;
++
++    device const T * x  = (device const T *) (src0   + i03*args.nb03 + i02*args.nb02 + i01*args.nb01);
++    device const T * f0 = (device const T *) (src1_0 + (i03%args.nw3)*args.nbw3 + (i02%args.nw2)*args.nbw2 + (i01%args.nw1)*args.nbw1);
++    device const T * f1 = (device const T *) (src1_1 + i03*args.nbb3 + i02*args.nbb2 + i01*args.nbb1);
++    device const T * g0 = (device const T *) (src2_0 + (i03%args.nw3)*args.nbw3 + (i02%args.nw2)*args.nbw2 + (i01%args.nw1)*args.nbw1);
++
++    float sumf = 0.0f;
++
++    // parallel sum
++    for (int i00 = tpitg.x; i00 < args.ne00_t; i00 += ntg.x) {
++        sumf += dot(x[i00], x[i00]);
++    }
++    sumf = simd_sum(sumf);
++
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++
++    if (tiisg == 0) {
++        shmem_f32[sgitg] = sumf;
++    }
++
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++
++    sumf = shmem_f32[tiisg];
++    sumf = simd_sum(sumf);
++
++    const float mean  = sumf/args.ne00;
++    const float scale = 1.0f/sqrt(mean + args.eps);
++
++    device T * y = (device T *) (sum + i03*args.nbs3 + i02*args.nbs2 + i01*args.nbs1);
++    for (int i00 = tpitg.x; i00 < args.ne00_t; i00 += ntg.x) {
++        y[i00] = (x[i00]*scale)*f0[i00] + f1[i00];
++    }
++
++    // the second norm (ggml's kernel run on y): its shared memory is re-zeroed as at that kernel's start
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++    if (sgitg == 0) {
++        shmem_f32[tiisg] = 0.0f;
++    }
++
++    device const T * x2 = (device const T *) y;
++
++    float sumf2 = 0.0f;
++
++    for (int i00 = tpitg.x; i00 < args.ne00_t; i00 += ntg.x) {
++        sumf2 += dot(x2[i00], x2[i00]);
++    }
++    sumf2 = simd_sum(sumf2);
++
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++
++    if (tiisg == 0) {
++        shmem_f32[sgitg] = sumf2;
++    }
++
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++
++    sumf2 = shmem_f32[tiisg];
++    sumf2 = simd_sum(sumf2);
++
++    const float mean2  = sumf2/args.ne00;
++    const float scale2 = 1.0f/sqrt(mean2 + args.eps2);
++
++    device T * y2 = (device T *) (dst + i03*args.nb3 + i02*args.nb2 + i01*args.nb1);
++    for (int i00 = tpitg.x; i00 < args.ne00_t; i00 += ntg.x) {
++        y2[i00] = (x2[i00]*scale2)*g0[i00];
++    }
++}

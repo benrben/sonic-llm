@@ -1,0 +1,10 @@
+{
+ "family": "llama31",
+ "now_as_utc": 1793377136,
+ "gguf": "Llama-3.1-8B-Instruct-Q4_0.gguf",
+ "llama_server": "b11669-620d2225c",
+ "bos_token": "<|begin_of_text|>",
+ "eos_token": "<|eot_id|>",
+ "chat_template_sha256": "93c0e9aa3629bbd77e68dbc0f5621f6e6b23aa8d74b932595cdb8d64684526d7",
+ "generations": 4
+}

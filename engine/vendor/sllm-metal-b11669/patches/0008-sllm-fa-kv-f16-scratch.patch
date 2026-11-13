@@ -1,0 +1,62 @@
+SLLM patch 8: flash attention reserves its F16 dequant scratch (a full F16 copy of the op's K and V views) only for
+the K/V types that the dequant pass converts (Q4_0, Q4_1, Q5_0, Q5_1, Q8_0). Stock ggml reserves it for every type,
+although F16/BF16/F32 K/V are read in place and the scratch is never touched. Against llama.cpp b11669 (source
+tarball 620d222) after patches 1-7, applied with patch -p1 in ggml/.
+
+--- a/src/ggml-metal/ggml-metal-ops.cpp
++++ b/src/ggml-metal/ggml-metal-ops.cpp
+@@ -3114,6 +3114,21 @@
+     return (ne01 < 20) && (ne00 % 32 == 0);
+ }
+ 
++// SLLM patch 8: the K/V types that the F16 dequant pass converts. Only these ever read the dequant scratch, so only
++// they reserve it (ggml_metal_op_flash_attn_ext_extra_kv_f16); every other type is read in place with its own strides
++static bool ggml_metal_op_flash_attn_ext_kv_type_dequant(const ggml_tensor * op) {
++    switch (op->src[1]->type) {
++        case GGML_TYPE_Q4_0:
++        case GGML_TYPE_Q4_1:
++        case GGML_TYPE_Q5_0:
++        case GGML_TYPE_Q5_1:
++        case GGML_TYPE_Q8_0:
++            return true;
++        default:
++            return false;
++    }
++}
++
+ // ref: https://github.com/ggml-org/llama.cpp/pull/27390
+ // dequantize the quantized KV cache to F16 before running the F16 flash attention kernels
+ static bool ggml_metal_op_flash_attn_ext_use_kv_f16(const ggml_tensor * op) {
+@@ -3128,16 +3143,7 @@
+         return false;
+     }
+ 
+-    switch (op->src[1]->type) {
+-        case GGML_TYPE_Q4_0:
+-        case GGML_TYPE_Q4_1:
+-        case GGML_TYPE_Q5_0:
+-        case GGML_TYPE_Q5_1:
+-        case GGML_TYPE_Q8_0:
+-            return true;
+-        default:
+-            return false;
+-    }
++    return ggml_metal_op_flash_attn_ext_kv_type_dequant(op);
+ }
+ 
+ static bool ggml_metal_op_flash_attn_ext_use_tensor(const ggml_tensor * op, bool has_tensor) {
+@@ -3396,6 +3402,14 @@
+     //if (!ggml_metal_op_flash_attn_ext_use_kv_f16(op)) {
+     //    return 0;
+     //}
++
++    // SLLM patch 8: but only for a K/V type that the dequant pass converts. For F16 (and BF16, F32) K/V the kernels
++    // read the cache in place and never touch this scratch, and stock ggml reserved a full F16 copy of the whole K and
++    // V view anyway: 808 MiB per attention op over SLLM's 206,848-cell pool. The test depends on the type only, not on
++    // the query rows, so the size does not change between prefill and decode steps (no extra graph reallocations).
++    if (!ggml_metal_op_flash_attn_ext_kv_type_dequant(op)) {
++        return 0;
++    }
+ 
+     GGML_TENSOR_LOCALS( int32_t, ne2, op->src[2], ne);
+ 

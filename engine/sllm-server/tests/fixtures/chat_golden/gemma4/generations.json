@@ -1,0 +1,465 @@
+[
+ {
+  "name": "weather_call",
+  "messages": [
+   {
+    "role": "user",
+    "content": "What's the weather in Paris right now? Use the tool."
+   }
+  ],
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "search_docs",
+     "description": "Search the docs, e.g. for “café” — 日本語 ok",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "query": {
+        "type": "string",
+        "description": "free text"
+       },
+       "limit": {
+        "type": "integer"
+       },
+       "filters": {
+        "type": "object",
+        "properties": {
+         "zeta": {
+          "type": "number"
+         },
+         "alpha": {
+          "type": "array",
+          "items": {
+           "type": "string",
+           "enum": [
+            "b",
+            "a",
+            "c"
+           ]
+          }
+         },
+         "mid": {
+          "type": "object",
+          "properties": {
+           "b": {
+            "type": "boolean"
+           },
+           "a": {
+            "type": "string"
+           }
+          }
+         }
+        }
+       }
+      },
+      "required": [
+       "query"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "get_weather",
+     "description": "Weather for a city",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "unit": {
+        "type": "string",
+        "enum": [
+         "celsius",
+         "fahrenheit"
+        ]
+       },
+       "city": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "city"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "ping",
+     "description": "No arguments",
+     "parameters": {
+      "type": "object",
+      "properties": {}
+     }
+    }
+   }
+  ],
+  "status": 200,
+  "raw": "<|tool_call>call:get_weather{city:<|\"|>Paris<|\"|>}<tool_call|>",
+  "finish_reason": "tool_calls",
+  "message": {
+   "content": "",
+   "tool_calls": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "arguments": "{\"city\":\"Paris\"}"
+     },
+     "id": "Xpvgp7NlTA3nqfTlM4mPQrwtQ4BIcevj"
+    }
+   ]
+  }
+ },
+ {
+  "name": "search_nested",
+  "messages": [
+   {
+    "role": "system",
+    "content": "You are a helpful assistant."
+   },
+   {
+    "role": "user",
+    "content": "Search the docs for café with limit 3, filters: alpha b and a, zeta 1.5. Use the tool."
+   }
+  ],
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "search_docs",
+     "description": "Search the docs, e.g. for “café” — 日本語 ok",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "query": {
+        "type": "string",
+        "description": "free text"
+       },
+       "limit": {
+        "type": "integer"
+       },
+       "filters": {
+        "type": "object",
+        "properties": {
+         "zeta": {
+          "type": "number"
+         },
+         "alpha": {
+          "type": "array",
+          "items": {
+           "type": "string",
+           "enum": [
+            "b",
+            "a",
+            "c"
+           ]
+          }
+         },
+         "mid": {
+          "type": "object",
+          "properties": {
+           "b": {
+            "type": "boolean"
+           },
+           "a": {
+            "type": "string"
+           }
+          }
+         }
+        }
+       }
+      },
+      "required": [
+       "query"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "get_weather",
+     "description": "Weather for a city",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "unit": {
+        "type": "string",
+        "enum": [
+         "celsius",
+         "fahrenheit"
+        ]
+       },
+       "city": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "city"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "ping",
+     "description": "No arguments",
+     "parameters": {
+      "type": "object",
+      "properties": {}
+     }
+    }
+   }
+  ],
+  "status": 200,
+  "raw": "<|tool_call>call:search_docs{filters:{alpha:[<|\"|>b<|\"|>,<|\"|>a<|\"|>],zeta:1.5},limit:3,query:<|\"|>café<|\"|>}<tool_call|>",
+  "finish_reason": "tool_calls",
+  "message": {
+   "content": "",
+   "tool_calls": [
+    {
+     "type": "function",
+     "function": {
+      "name": "search_docs",
+      "arguments": "{\"filters\":{\"alpha\":[\"b\",\"a\"],\"zeta\":1.5},\"limit\":3,\"query\":\"café\"}"
+     },
+     "id": "Fu4KIAE3riLc86fxy47COgXDZE7lsFdB"
+    }
+   ]
+  }
+ },
+ {
+  "name": "two_calls",
+  "messages": [
+   {
+    "role": "user",
+    "content": "In one go: ping, and the weather in Rome in celsius. Call both tools."
+   }
+  ],
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "search_docs",
+     "description": "Search the docs, e.g. for “café” — 日本語 ok",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "query": {
+        "type": "string",
+        "description": "free text"
+       },
+       "limit": {
+        "type": "integer"
+       },
+       "filters": {
+        "type": "object",
+        "properties": {
+         "zeta": {
+          "type": "number"
+         },
+         "alpha": {
+          "type": "array",
+          "items": {
+           "type": "string",
+           "enum": [
+            "b",
+            "a",
+            "c"
+           ]
+          }
+         },
+         "mid": {
+          "type": "object",
+          "properties": {
+           "b": {
+            "type": "boolean"
+           },
+           "a": {
+            "type": "string"
+           }
+          }
+         }
+        }
+       }
+      },
+      "required": [
+       "query"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "get_weather",
+     "description": "Weather for a city",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "unit": {
+        "type": "string",
+        "enum": [
+         "celsius",
+         "fahrenheit"
+        ]
+       },
+       "city": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "city"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "ping",
+     "description": "No arguments",
+     "parameters": {
+      "type": "object",
+      "properties": {}
+     }
+    }
+   }
+  ],
+  "status": 200,
+  "raw": "<|tool_call>call:ping{}<tool_call|><|tool_call>call:get_weather{city:<|\"|>Rome<|\"|>,unit:<|\"|>celsius<|\"|>}<tool_call|>",
+  "finish_reason": "tool_calls",
+  "message": {
+   "content": "",
+   "tool_calls": [
+    {
+     "type": "function",
+     "function": {
+      "name": "ping",
+      "arguments": "{}"
+     },
+     "id": "gonVR63NwFdvF7np5rHVND9GMNVq3E6n"
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "arguments": "{\"city\":\"Rome\",\"unit\":\"celsius\"}"
+     },
+     "id": "6IAKj3sSdSFsaOkZdEBL5IyIp01RWFn0"
+    }
+   ]
+  }
+ },
+ {
+  "name": "plain_answer",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Say hello in one short sentence. Do not use any tool."
+   }
+  ],
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "search_docs",
+     "description": "Search the docs, e.g. for “café” — 日本語 ok",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "query": {
+        "type": "string",
+        "description": "free text"
+       },
+       "limit": {
+        "type": "integer"
+       },
+       "filters": {
+        "type": "object",
+        "properties": {
+         "zeta": {
+          "type": "number"
+         },
+         "alpha": {
+          "type": "array",
+          "items": {
+           "type": "string",
+           "enum": [
+            "b",
+            "a",
+            "c"
+           ]
+          }
+         },
+         "mid": {
+          "type": "object",
+          "properties": {
+           "b": {
+            "type": "boolean"
+           },
+           "a": {
+            "type": "string"
+           }
+          }
+         }
+        }
+       }
+      },
+      "required": [
+       "query"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "get_weather",
+     "description": "Weather for a city",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "unit": {
+        "type": "string",
+        "enum": [
+         "celsius",
+         "fahrenheit"
+        ]
+       },
+       "city": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "city"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "ping",
+     "description": "No arguments",
+     "parameters": {
+      "type": "object",
+      "properties": {}
+     }
+    }
+   }
+  ],
+  "status": 200,
+  "raw": "Hello!",
+  "finish_reason": "stop",
+  "message": {
+   "content": "Hello!",
+   "tool_calls": []
+  }
+ }
+]

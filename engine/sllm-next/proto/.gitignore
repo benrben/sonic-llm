@@ -1,0 +1,10 @@
+# built by build.sh / clang
+next
+sn_test
+probe
+# run outputs and server logs of the scripts
+out-*.json
+*.job.json
+*.srv.log
+*.out
+draft_bench

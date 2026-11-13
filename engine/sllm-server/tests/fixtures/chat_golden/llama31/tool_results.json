@@ -1,0 +1,66 @@
+{
+ "family": "llama31",
+ "gguf": "Llama-3.1-8B-Instruct-Q4_0.gguf",
+ "conversation": "tool_results",
+ "messages": [
+  {
+   "role": "system",
+   "content": "Use tools when useful."
+  },
+  {
+   "role": "user",
+   "content": "Look up café docs and the weather in Zürich."
+  },
+  {
+   "role": "assistant",
+   "content": "",
+   "tool_calls": [
+    {
+     "id": "call_1",
+     "type": "function",
+     "function": {
+      "name": "search_docs",
+      "arguments": "{\"query\": \"caf\\u00e9 \\u65e5\\u672c\", \"limit\": 3, \"filters\": {\"zeta\": 1.5, \"alpha\": [\"b\", \"a\"], \"mid\": {\"b\": true, \"a\": null}}}"
+     }
+    },
+    {
+     "id": "call_2",
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "arguments": "{\"city\": \"Z\\u00fcrich\", \"unit\": \"celsius\"}"
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_1",
+   "content": "3 hits: café.md, menu.md"
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_2",
+   "content": "12 C, clear"
+  },
+  {
+   "role": "assistant",
+   "content": "Found 3 docs; it is 12 C in Zürich."
+  },
+  {
+   "role": "user",
+   "content": "Great."
+  }
+ ],
+ "tools": [],
+ "error": {
+  "status": 400,
+  "body": {
+   "error": {
+    "code": 400,
+    "message": "Unable to generate parser for this template. Automatic parser generation failed: \n------------\nWhile executing CallExpression at line 71, column 32 in source:\n... == 1 %}↵            {{- raise_exception(\"This model only supports single tool-c...\n                                           ^\nError: Jinja Exception: This model only supports single tool-calls at once!",
+    "type": "invalid_request_error"
+   }
+  }
+ }
+}

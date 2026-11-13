@@ -1,0 +1,27 @@
+{
+ "family": "gemma3",
+ "gguf": "gemma-3-4b-it-qat-Q4_0.gguf",
+ "conversation": "user_only",
+ "messages": [
+  {
+   "role": "user",
+   "content": "Hello there"
+  }
+ ],
+ "tools": [],
+ "prompt": "<start_of_turn>user\nHello there<end_of_turn>\n<start_of_turn>model\n",
+ "tokens": [
+  2,
+  105,
+  2364,
+  107,
+  9259,
+  993,
+  106,
+  107,
+  105,
+  4368,
+  107
+ ],
+ "server_prompt_tokens": 11
+}

@@ -1,0 +1,415 @@
+SLLM patch 14 (phase2-cascadeexact): the shared-prefix decode attention (cascade, patches 3, 4 and 6) gives every row
+bits that do not depend on the rest of the op: the other rows of the group, how many there are, the K/V view around
+the row's cells. Before, two plan choices depended on the row count R = agents x G: the prefix splits (4 up to 32
+rows, else 2: a different partition of the prefix and a different merge) and the prefix pass's softmax layout (8
+threads x 8 cells per row with the 16-row tile, 4 x 16 with the 32-row tile: a different sum order); and auto mode
+sent groups of fewer than 8 agents to ggml's kernels. So one agent's logits changed with the size of its group.
+- kernels/cascade.metal: the prefix softmax uses 4 threads x C/4 cells per row with either row tile (the 16-row tile
+  leaves its upper two simdgroups out of the softmax); the 32-row tile is unchanged.
+- ggml-metal-cascade.{h,m}: the splits depend on the prefix length only (ggml_metal_sllm_cascade_splits, default 2,
+  SLLM_CASCADE_S=N for A/Bs); auto mode takes any number of rows; a bitwise self-test at init (three shapes; one K/V
+  view and 20 agents, the op over the first 1, 2, 8, 9, 17 agents must give each the bits it gets among 20); status
+  fields exact_rows and splits.
+- ggml-metal-cascadeq.m: the mixed-precision cascade uses the same splits rule.
+- ggml-metal-qmm.{h,m}: a MUL_MAT marked op_params[13] = "SLQ1" takes qmm for a single row too (as SLLM_QMM32_N1=1
+  does for every one): sllm-core marks the mat-muls of a one-row step whose row decodes through the cascade, so that
+  agent computes alone what it computes in a batch. Unmarked single rows keep ggml's mat-vec (batch-1 parity).
+Against llama.cpp b11669 (source tarball 620d222) after patches 0001..0011 and 0013, applied with patch -p1 in ggml/.
+
+--- a/src/ggml-metal/ggml-metal-qmm.h
++++ b/src/ggml-metal/ggml-metal-qmm.h
+@@ -12,6 +12,10 @@
+ extern "C" {
+ #endif
+ 
++// patch 14: op_params[13] of a MUL_MAT (ggml uses slots 0..1): a single-row mat-mul takes qmm too, like N >= 2
++// (sllm-core marks the mat-muls of a one-row step whose row decodes through the cascade; status qmm32.row_mark)
++#define GGML_METAL_SLLM_QMM_ROW_MAGIC 0x534C5131 // "SLQ1"
++
+ // kernel arguments; the same layout is declared in kernels/qmm.metal (kept out of ggml-metal-impl.h so that the
+ // embedded sources of every official kernel stay byte-identical to b11669)
+ typedef struct {
+--- a/src/ggml-metal/ggml-metal-qmm.m
++++ b/src/ggml-metal/ggml-metal-qmm.m
+@@ -85,18 +85,21 @@
+     snprintf(g_qmm.compile_msg, sizeof(g_qmm.compile_msg), "%s", msg ? msg : "unknown");
+ }
+ 
+-static bool sllm_qmm_n_in_table(enum ggml_type type, int64_t n) {
++static bool sllm_qmm_n_in_table(enum ggml_type type, int64_t n, bool row_mark) {
+     if (g_qmm.mode == SLLM_QMM_MODE_FORCE) {
+         return n >= 2;
+     }
+     if (g_qmm.ks_on) {
++        // patch 14: a marked single-row mat-mul (op_params[13] = GGML_METAL_SLLM_QMM_ROW_MAGIC, sllm-core's one-row
++        // step of an agent on the cascade) takes qmm too, so that row computes what it computes in any batch
++        const int minn = row_mark ? 1 : g_qmm.ks_minn;
+         // patch 10 (phase2-qmm32b): every row count from 2 up takes the same kernel and accumulation order, so a
+         // token's result does not depend on the rows its step happens to have (decode rows next to a prefill chunk,
+         // chunk sizes, joins and leaves). N = 1 stays on ggml's mat-vec (batch-1 byte identity, llama.cpp parity).
+         switch (type) {
+             case GGML_TYPE_Q4_0:
+-            case GGML_TYPE_Q4_1: return n >= g_qmm.ks_minn && (g_qmm.ks_maxn <= 0 || n <= g_qmm.ks_maxn);
+-            case GGML_TYPE_Q6_K: return n >= g_qmm.ks_minn && n <= 128;   // above: all-logits runs only (perplexity), ggml is faster
++            case GGML_TYPE_Q4_1: return n >= minn && (g_qmm.ks_maxn <= 0 || n <= g_qmm.ks_maxn);
++            case GGML_TYPE_Q6_K: return n >= minn && n <= 128;   // above: all-logits runs only (perplexity), ggml is faster
+             default:             return false;
+         }
+     }
+@@ -200,7 +203,7 @@
+     if (op->ne[0] != M || op->ne[1]*op->ne[2]*op->ne[3] != N || !ggml_is_contiguous(op)) {
+         return false;
+     }
+-    if (!sllm_qmm_n_in_table(type, N) || N*M > INT32_MAX || (int64_t) (src1->nb[1]/sizeof(float)) > INT32_MAX) {
++    if (!sllm_qmm_n_in_table(type, N, ggml_get_op_params_i32(op, 13) == GGML_METAL_SLLM_QMM_ROW_MAGIC) || N*M > INT32_MAX || (int64_t) (src1->nb[1]/sizeof(float)) > INT32_MAX) {
+         return false;
+     }
+ 
+@@ -645,7 +648,7 @@
+         "\"selftest\":{\"ran\":%s,\"pass\":%s,\"cases\":%d,\"worst_rel_rms\":%.3e,\"worst_max_rel\":%.3e,\"ms\":%.2f},"
+         "\"table\":\"q4_0,q4_1: 9<=N<=128; q6_K: 9<=N<=64\",\"dispatches\":%llu,"
+         "\"qmm32\":{\"patch\":\"sllm-qmm32-1\",\"on\":%s,\"g\":\"%s\",\"il\":\"%s\",\"q6\":%s,"
+-        "\"table\":\"q4_0,q4_1: N>=2; q6_K: 2<=N<=128 (one order for every N)\",\"dispatches\":%llu}}",
++        "\"table\":\"q4_0,q4_1: N>=2; q6_K: 2<=N<=128 (one order for every N)\",\"row_mark\":true,\"dispatches\":%llu}}",
+         g_qmm.initialized ? "true" : "false", g_qmm.active ? "true" : "false",
+         g_qmm.mode == SLLM_QMM_MODE_OFF ? "off" : g_qmm.mode == SLLM_QMM_MODE_FORCE ? "force" : "auto", reason,
+         g_qmm.selftest_ran ? "true" : "false", g_qmm.selftest_pass ? "true" : "false", g_qmm.selftest_cases,
+--- a/src/ggml-metal/ggml-metal-cascade.h
++++ b/src/ggml-metal/ggml-metal-cascade.h
+@@ -22,6 +22,13 @@
+ 
+ #define GGML_METAL_SLLM_CASCADE_MAGIC 0x534C4341 // "SLCA"
+ 
++// patch 14: prefix splits (default; SLLM_CASCADE_S overrides at device init). The split of a prefix of P cells into
++// chunks depends on P only, never on the number of rows, so a row's bits do not depend on its group.
++#define SLLM_CASCADE_SPLITS 2
++
++// the splits S and chunk cells for a prefix of P cells (shared by the mixed-precision cascade, patch 6)
++int ggml_metal_sllm_cascade_splits(int P, int * chunk_out);
++
+ // kernel arguments; the same layout is declared in kernels/cascade.metal
+ typedef struct {
+     int32_t ne01;    // agents (query rows)
+--- a/src/ggml-metal/ggml-metal-cascade.m
++++ b/src/ggml-metal/ggml-metal-cascade.m
+@@ -14,7 +14,13 @@
+ // row, one for all heads; no sinks, no ALiBi, no logit softcap; dst contiguous f32.
+ //
+ // Tiles (sllm/results/phase2-cascade, standalone sweep): prefix row tile 16 rows up to 16 rows per KV head, else 32;
+-// 64 cells per prefix step; 4 prefix splits up to 32 rows per KV head, else 2.
++// 64 cells per prefix step.
++//
++// SLLM patch 14 (phase2-cascadeexact): a row's result is bitwise independent of the rest of the op (the other rows,
++// their number, the K/V view around the row's cells): the prefix splits depend on the prefix length only
++// (ggml_metal_sllm_cascade_splits), the prefix pass's softmax has the same per-row layout with either row tile, and
++// auto mode takes any number of rows (no 8-row floor: an agent's attention must not change kernels with the size of
++// its group). Checked at init by a bitwise self-test over row counts 1..20.
+ 
+ #import "ggml-metal-cascade.h"
+ 
+@@ -32,7 +38,7 @@
+ #define SLLM_CASCADE_C      64  // prefix cells per step
+ #define SLLM_CASCADE_B      32  // suffix block (cells)
+ #define SLLM_CASCADE_NTH    128 // fused kernel: 4 simdgroups
+-#define SLLM_CASCADE_MIN_N  8   // auto mode: fewest query rows (agents)
++#define SLLM_CASCADE_MIN_N  1   // auto mode: fewest query rows (agents); patch 14: any (was 8)
+ 
+ enum sllm_cascade_mode { SLLM_CASCADE_MODE_AUTO = 0, SLLM_CASCADE_MODE_OFF = 1, SLLM_CASCADE_MODE_FORCE = 2 };
+ 
+@@ -60,6 +66,23 @@
+ 
+ static size_t sllm_cas_align(size_t x) { return (x + 255) & ~(size_t) 255; }
+ 
++// prefix splits wanted (SLLM_CASCADE_S, read at device init; tests and A/Bs only)
++static int g_cas_splits = SLLM_CASCADE_SPLITS;
++
++int ggml_metal_sllm_cascade_splits(int P, int * chunk_out) {
++    int S = g_cas_splits;
++    int chunk = (P + S - 1)/S;
++    chunk = (chunk + SLLM_CASCADE_C - 1)/SLLM_CASCADE_C*SLLM_CASCADE_C;
++    if (chunk < SLLM_CASCADE_C) {
++        chunk = SLLM_CASCADE_C;
++    }
++    S = P > 0 ? (P + chunk - 1)/chunk : 0;
++    if (chunk_out) {
++        *chunk_out = chunk;
++    }
++    return S;
++}
++
+ // fill the plan from the shapes; false when a size limit is exceeded
+ static bool sllm_cascade_fill_plan(struct ggml_metal_sllm_cascade_plan * p, int D, int N, int H, int HKV, int ne11, int p0, int p1,
+         uint64_t nb01, uint64_t nb02, uint64_t nb11, uint64_t nb12, uint64_t nb21, uint64_t nb22, uint64_t nb31, float scale) {
+@@ -68,10 +91,8 @@
+     const int rt = R <= 16 ? 16 : 32;
+     const int Rpad = (R + rt - 1)/rt*rt;
+     const int P = p1 - p0;
+-    int S = R <= 32 ? 4 : 2;
+-    int chunk = (P + S - 1)/S;
+-    chunk = (chunk + SLLM_CASCADE_C - 1)/SLLM_CASCADE_C*SLLM_CASCADE_C;
+-    S = (P + chunk - 1)/chunk;
++    int chunk = SLLM_CASCADE_C;
++    const int S = ggml_metal_sllm_cascade_splits(P, &chunk); // the prefix length only, never the rows (patch 14)
+     const int nbt = p0/SLLM_CASCADE_B + (ne11 - p1 + SLLM_CASCADE_B - 1)/SLLM_CASCADE_B;
+     if (nbt > 256*32) {
+         return false; // the scan keeps one bit per block in a register: at most 32 blocks per thread
+@@ -296,6 +317,9 @@
+     int hide;                       // prefix cells [low, low + hide) hidden from every row (a window)
+ };
+ 
++static bool sllm_cascade_selftest_rows(id<MTLDevice> device, id<MTLCommandQueue> queue, ggml_metal_library_t lib, int D, int H, int HKV,
++        char * why, size_t why_n);
++
+ static bool sllm_cascade_selftest(ggml_metal_device_t dev, ggml_metal_library_t lib, char * why, size_t why_n) {
+     const struct sllm_cas_case cases[4] = {
+         { 128, 4, 2,  9, 256,  512, 40, 64 },
+@@ -432,6 +456,12 @@
+             }
+             [bq release]; [bk release]; [bv release]; [bm release]; [bd release];
+         }
++        // patch 14: the bits of a row do not depend on the other rows of the op (Qwen3-0.6B's, Gemma-3-4B's and a G = 4 shape)
++        const int shapes[3][3] = { { 128, 16, 8 }, { 256, 8, 4 }, { 128, 8, 2 } };
++        for (int i = 0; i < 3 && ok; ++i) {
++            ok = sllm_cascade_selftest_rows(device, queue, lib, shapes[i][0], shapes[i][1], shapes[i][2], why, why_n);
++            n_cases += ok;
++        }
+         [queue release];
+     }
+ 
+@@ -439,6 +469,106 @@
+     g_cas.selftest_worst_max_rel = worst_max;
+     g_cas.selftest_worst_rel_rms = worst_rms;
+     g_cas.selftest_ms            = (ggml_time_us() - t0)/1e3;
++    return ok;
++}
++
++
++// patch 14: bitwise independence of a row's result from the rest of the op. One K/V view and one set of Nmax agents
++// (a 1,024-cell prefix after 256 low cells, each agent's own run in its 256-cell page, prefix blocks hidden from some
++// rows only); the op over the first N agents, N = 1, 2, 8, 9, 17, 20 (both row tiles, padded tiles), must give every
++// one of them the bits it gets with all 20.
++static bool sllm_cascade_selftest_rows(id<MTLDevice> device, id<MTLCommandQueue> queue, ggml_metal_library_t lib, int D, int H, int HKV,
++        char * why, size_t why_n) {
++    enum { NMAX = 20, LOW = 256, P = 1024 };
++    const int Ns[6] = { NMAX, 1, 2, 8, 9, 17 };
++    const int ne11 = LOW + P + NMAX*256;
++    const int p0 = LOW, p1 = LOW + P;
++    const size_t rowk = (size_t) HKV*D;
++    const size_t out1 = (size_t) D*H; // floats per agent
++    bool ok = true;
++    id<MTLBuffer> bq = [device newBufferWithLength:(size_t) NMAX*H*D*4 options:MTLResourceStorageModeShared];
++    id<MTLBuffer> bk = [device newBufferWithLength:(size_t) ne11*rowk*2 options:MTLResourceStorageModeShared];
++    id<MTLBuffer> bv = [device newBufferWithLength:(size_t) ne11*rowk*2 options:MTLResourceStorageModeShared];
++    id<MTLBuffer> bm = [device newBufferWithLength:(size_t) NMAX*ne11*2 options:MTLResourceStorageModeShared];
++    float * ref = (float *) malloc(NMAX*out1*sizeof(float));
++    if (!bq || !bk || !bv || !bm || !ref) {
++        snprintf(why, why_n, "buffer allocation failed (rows check)");
++        ok = false;
++    }
++    if (ok) {
++        uint64_t seed = 0x5EED0014ull + (uint64_t) D*31 + (uint64_t) H;
++        float * q = (float *) [bq contents];
++        __fp16 * k = (__fp16 *) [bk contents];
++        __fp16 * v = (__fp16 *) [bv contents];
++        __fp16 * m = (__fp16 *) [bm contents];
++        // peaked scores (std about 5): many probabilities far below 1, so different sum orders round differently
++        for (size_t i = 0; i < (size_t) NMAX*H*D; ++i) q[i] = 15.0f*sllm_cas_rngf(&seed);
++        for (size_t i = 0; i < (size_t) ne11*rowk; ++i) { k[i] = (__fp16) sllm_cas_rngf(&seed); v[i] = (__fp16) sllm_cas_rngf(&seed); }
++        for (int n = 0; n < NMAX; ++n) {
++            __fp16 * row = m + (size_t) n*ne11;
++            for (int j = 0; j < ne11; ++j) row[j] = (__fp16) -INFINITY;
++            const int vis0 = p0 + (n % 5)*64 + (n & 1)*32;  // windows: whole and half blocks hidden from some rows only
++            for (int j = vis0; j < p1; ++j) row[j] = 0;
++            for (int j = 0; j < 40 + 3*n; ++j) row[p1 + n*256 + j] = 0;
++            if (n % 7 == 0) for (int j = 0; j < 45; ++j) row[j + 64] = 0; // low cells for a few
++        }
++    }
++    for (int t = 0; t < 6 && ok; ++t) {
++        const int N = Ns[t];
++        struct ggml_metal_sllm_cascade_plan plan;
++        if (!sllm_cascade_fill_plan(&plan, D, N, H, HKV, ne11, p0, p1, (uint64_t) H*D*4, (uint64_t) D*4,
++                rowk*2, (uint64_t) D*2, rowk*2, (uint64_t) D*2, (uint64_t) ne11*2, 1.0f/sqrtf((float) D))) {
++            snprintf(why, why_n, "plan failed (rows check N=%d)", N);
++            ok = false;
++            break;
++        }
++        id<MTLBuffer> bd = [device newBufferWithLength:(size_t) N*out1*4 + plan.extra options:MTLResourceStorageModeShared];
++        if (!bd) {
++            snprintf(why, why_n, "buffer allocation failed (rows check)");
++            ok = false;
++            break;
++        }
++        float * dd = (float *) [bd contents];
++        for (size_t i = 0; i < (size_t) N*out1; ++i) dd[i] = NAN;
++        id<MTLCommandBuffer> cb = [queue commandBuffer];
++        ggml_metal_encoder_t enc = ggml_metal_encoder_init((ggml_metal_cmd_buf_t) cb, false);
++        const struct ggml_metal_buffer_id iq = { (void *) bq, 0 }, ik = { (void *) bk, 0 }, iv = { (void *) bv, 0 },
++                                          im = { (void *) bm, 0 }, idd = { (void *) bd, 0 };
++        const bool enc_ok = ggml_metal_sllm_cascade_encode(lib, enc, &plan, iq, ik, iv, im, idd);
++        ggml_metal_encoder_end_encoding(enc);
++        ggml_metal_encoder_free(enc);
++        if (!enc_ok) {
++            snprintf(why, why_n, "pipelines for D=%d rt=%d not available (rows check)", D, plan.rt);
++            ok = false;
++        } else {
++            [cb commit];
++            [cb waitUntilCompleted];
++            if ([cb status] != MTLCommandBufferStatusCompleted) {
++                snprintf(why, why_n, "command buffer failed (rows check): %s", [[[cb error] description] UTF8String]);
++                ok = false;
++            }
++        }
++        if (ok) {
++            if (t == 0) {
++                memcpy(ref, dd, (size_t) NMAX*out1*sizeof(float));
++                for (size_t i = 0; i < (size_t) NMAX*out1 && ok; ++i) {
++                    if (!isfinite(ref[i])) {
++                        snprintf(why, why_n, "non-finite output (rows check D=%d)", D);
++                        ok = false;
++                    }
++                }
++            } else if (memcmp(ref, dd, (size_t) N*out1*sizeof(float)) != 0) {
++                int bad = 0;
++                while (bad < N && memcmp(ref + (size_t) bad*out1, dd + (size_t) bad*out1, out1*sizeof(float)) == 0) ++bad;
++                snprintf(why, why_n, "row bits depend on the op: D=%d G=%d agent %d differs between N=%d and N=%d (rt %d)",
++                         D, H/HKV, bad, N, NMAX, plan.rt);
++                ok = false;
++            }
++        }
++        [bd release];
++    }
++    free(ref);
++    [bq release]; [bk release]; [bv release]; [bm release];
+     return ok;
+ }
+ 
+@@ -452,6 +582,10 @@
+ 
+     const char * tr  = getenv("SLLM_CASCADE_TRACE");
+     const char * env = getenv("SLLM_CASCADE");
++    const char * spl = getenv("SLLM_CASCADE_S");
++    if (spl && atoi(spl) >= 1 && atoi(spl) <= 16) {
++        g_cas_splits = atoi(spl);
++    }
+     if (env && strcmp(env, "0") == 0) {
+         g_cas.mode = SLLM_CASCADE_MODE_OFF;
+     } else if (env && strcmp(env, "force") == 0) {
+@@ -506,11 +640,11 @@
+     snprintf(buf, sizeof(buf),
+         "{\"patch\":\"sllm-cascade-1\",\"initialized\":%s,\"active\":%s,\"mode\":\"%s\",\"reason\":\"%s\","
+         "\"selftest\":{\"ran\":%s,\"pass\":%s,\"cases\":%d,\"worst_max_rel\":%.3e,\"worst_rel_rms\":%.3e,\"ms\":%.2f},"
+-        "\"rule\":\"hinted FLASH_ATTN_EXT (op_params[13..15]), f16 K/V, D in {128,256}, G in {2,4}, N>=%d\",\"dispatches\":%llu}",
++        "\"rule\":\"hinted FLASH_ATTN_EXT (op_params[13..15]), f16 K/V, D in {128,256}, G in {2,4}, N>=%d\",\"exact_rows\":true,\"splits\":%d,\"dispatches\":%llu}",
+         g_cas.initialized ? "true" : "false", g_cas.active ? "true" : "false",
+         g_cas.mode == SLLM_CASCADE_MODE_OFF ? "off" : g_cas.mode == SLLM_CASCADE_MODE_FORCE ? "force" : "auto", reason,
+         g_cas.selftest_ran ? "true" : "false", g_cas.selftest_pass ? "true" : "false", g_cas.selftest_cases,
+         g_cas.selftest_worst_max_rel, g_cas.selftest_worst_rel_rms, g_cas.selftest_ms,
+-        SLLM_CASCADE_MIN_N, (unsigned long long) atomic_load(&g_cas.dispatches));
++        SLLM_CASCADE_MIN_N, g_cas_splits, (unsigned long long) atomic_load(&g_cas.dispatches));
+     return buf;
+ }
+--- a/src/ggml-metal/ggml-metal-cascadeq.m
++++ b/src/ggml-metal/ggml-metal-cascadeq.m
+@@ -69,10 +69,7 @@
+     const int P = p1 - p0;
+     int S = 0, chunk = SLLM_CQ_C;
+     if (P > 0) {
+-        S = R <= 32 ? 4 : 2;
+-        chunk = (P + S - 1)/S;
+-        chunk = (chunk + SLLM_CQ_C - 1)/SLLM_CQ_C*SLLM_CQ_C;
+-        S = (P + chunk - 1)/chunk;
++        S = ggml_metal_sllm_cascade_splits(P, &chunk); // the prefix length only (patch 14)
+     }
+     const int nbt16 = p0/SLLM_CQ_B + (n16 - p1 + SLLM_CQ_B - 1)/SLLM_CQ_B;
+     const int nbt8 = (n8 + SLLM_CQ_B - 1)/SLLM_CQ_B;
+--- a/src/ggml-metal/kernels/cascade.metal
++++ b/src/ggml-metal/kernels/cascade.metal
+@@ -135,9 +135,12 @@
+         threadgroup  char  * shm,
+         uint3  tg, ushort tid, ushort sgi, ushort tii) {
+     constexpr int NT  = NSG * 32;
+-    constexpr int TPR = NT / RT;          // threads per row in the softmax (power of 2, <= 32)
++    // softmax: 4 threads per row with C/4 consecutive cells each, whatever RT (SLLM patch 14: a row's sum order, and
++    // so its bits, must not depend on the tile, which depends on how many rows the group has); with RT = 16 the upper
++    // NT/2 threads (whole simdgroups) have no row
++    constexpr int TPR = 4;
+     constexpr int CPT = C / TPR;          // cells per thread
+-    static_assert(TPR >= 1 && TPR <= 32 && CPT >= 1, "tile");
++    static_assert(RT * TPR <= NT && CPT >= 1 && (RT * TPR) % 32 == 0, "tile");
+ 
+     const int hk = tg.x, s = tg.y, r0 = tg.z * RT;
+ 
+@@ -169,8 +172,9 @@
+ 
+     const int lr = tid / TPR;                 // softmax row of this thread
+     const int lc = (tid % TPR) * CPT;
++    const bool act = lr < RT;                 // uniform per simdgroup
+     const int r = r0 + lr;
+-    const bool rvalid = r < a.R;
++    const bool rvalid = act && r < a.R;
+     device const half * mrow = (device const half *) (mask + (uint64_t) (rvalid ? r / a.G : 0) * a.nb31);
+     float M = SLLM_NEG, L = 0.0f;
+ 
+@@ -199,29 +203,31 @@
+         threadgroup_barrier(mem_flags::mem_threadgroup);
+ 
+         // online softmax, TPR threads per row
+-        float x[CPT];
+-        float mx = SLLM_NEG;
+-        #pragma unroll
+-        for (int c = 0; c < CPT; ++c) {
+-            x[c] = ss[lr * C + lc + c] + (float) mv[c];
+-            mx = max(mx, x[c]);
+-        }
+-        #pragma unroll
+-        for (int o = 1; o < TPR; o <<= 1) mx = max(mx, simd_shuffle_xor(mx, o));
+-        const float Mn = max(M, mx);
+-        const float ms = exp(M - Mn);
+-        float sum = 0.0f;
+-        #pragma unroll
+-        for (int c = 0; c < CPT; ++c) {
+-            const half p = (half) exp(x[c] - Mn);
+-            sum += (float) p; // normalize the same rounded probabilities used by P V
+-            sp[lr * C + lc + c] = p;
++        if (act) {
++            float x[CPT];
++            float mx = SLLM_NEG;
++            #pragma unroll
++            for (int c = 0; c < CPT; ++c) {
++                x[c] = ss[lr * C + lc + c] + (float) mv[c];
++                mx = max(mx, x[c]);
++            }
++            #pragma unroll
++            for (int o = 1; o < TPR; o <<= 1) mx = max(mx, simd_shuffle_xor(mx, o));
++            const float Mn = max(M, mx);
++            const float ms = exp(M - Mn);
++            float sum = 0.0f;
++            #pragma unroll
++            for (int c = 0; c < CPT; ++c) {
++                const half p = (half) exp(x[c] - Mn);
++                sum += (float) p; // normalize the same rounded probabilities used by P V
++                sp[lr * C + lc + c] = p;
++            }
++            #pragma unroll
++            for (int o = 1; o < TPR; o <<= 1) sum += simd_shuffle_xor(sum, o);
++            L = L * ms + sum;
++            M = Mn;
++            if (tid % TPR == 0) sa[lr] = ms;
+         }
+-        #pragma unroll
+-        for (int o = 1; o < TPR; o <<= 1) sum += simd_shuffle_xor(sum, o);
+-        L = L * ms + sum;
+-        M = Mn;
+-        if (tid % TPR == 0) sa[lr] = ms;
+         threadgroup_barrier(mem_flags::mem_threadgroup);
+ 
+         #pragma unroll
+@@ -238,7 +244,7 @@
+     device float * o0 = po + (((uint64_t) s * a.HKV + hk) * a.Rpad + r0) * D;
+     auto tO = tensor(o0, dextents<int32_t, 2>(D, RT), array<int, 2>({1, D}));
+     cO.store(tO);
+-    if (tid % TPR == 0) {
++    if (act && tid % TPR == 0) {
+         device float * ml = pml + (((uint64_t) s * a.HKV + hk) * a.Rpad + r) * 2;
+         ml[0] = M;
+         ml[1] = rvalid ? L : 0.0f;

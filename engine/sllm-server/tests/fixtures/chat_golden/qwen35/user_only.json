@@ -1,0 +1,30 @@
+{
+ "family": "qwen35",
+ "gguf": "Qwen3.5-4B-Q4_0.gguf",
+ "conversation": "user_only",
+ "messages": [
+  {
+   "role": "user",
+   "content": "Hello there"
+  }
+ ],
+ "tools": [],
+ "prompt": "<|im_start|>user\nHello there<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+ "tokens": [
+  248045,
+  846,
+  198,
+  9419,
+  1017,
+  248046,
+  198,
+  248045,
+  74455,
+  198,
+  248068,
+  271,
+  248069,
+  271
+ ],
+ "server_prompt_tokens": 14
+}

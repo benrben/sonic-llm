@@ -1,0 +1,87 @@
+{
+  "captured_at": "2026-10-26T10:40:26+0200",
+  "server": "/Users/benreich/Projects/crazyidea/research/inference_runtime/vendor/llama-bin/llama-server",
+  "argv": [
+    "/Users/benreich/Projects/crazyidea/research/inference_runtime/vendor/llama-bin/llama-server",
+    "-m",
+    "/Users/benreich/Projects/crazyidea/research/inference_runtime/converted/qwen3-0.6b-Q4_0.gguf",
+    "--host",
+    "127.0.0.1",
+    "--port",
+    "51745",
+    "-ngl",
+    "99",
+    "-fa",
+    "on",
+    "-c",
+    "512",
+    "-np",
+    "1"
+  ],
+  "model": "/Users/benreich/Projects/crazyidea/research/inference_runtime/converted/qwen3-0.6b-Q4_0.gguf",
+  "request": {
+    "prompt": [
+      785,
+      3974,
+      13876,
+      38835,
+      34208,
+      916,
+      279,
+      15678,
+      5562,
+      13,
+      5005,
+      432
+    ],
+    "n_predict": 8,
+    "temperature": 0.0,
+    "cache_prompt": false,
+    "ignore_eos": true,
+    "return_tokens": true,
+    "return_progress": false,
+    "stream": true
+  },
+  "text": "The quick brown fox jumps over the lazy dog. Then it",
+  "stream_response": {
+    "status": 200,
+    "reason": "OK",
+    "headers": {
+      "Server": "llama.cpp",
+      "Access-Control-Allow-Origin": "",
+      "X-Accel-Buffering": "no",
+      "Content-Type": "text/event-stream",
+      "Transfer-Encoding": "chunked",
+      "Keep-Alive": "timeout=5, max=100"
+    }
+  },
+  "nonstream_response": {
+    "status": 200,
+    "reason": "OK",
+    "headers": {
+      "Server": "llama.cpp",
+      "Access-Control-Allow-Origin": "",
+      "Content-Type": "application/json; charset=utf-8",
+      "Content-Length": "2001",
+      "Keep-Alive": "timeout=5, max=100"
+    }
+  },
+  "health_body": "{\"status\":\"ok\"}",
+  "errors": {
+    "missing_prompt": {
+      "status": 400,
+      "content_type": "application/json; charset=utf-8",
+      "body": "{\"error\":{\"code\":400,\"message\":\"[json.exception.out_of_range.403] key 'prompt' not found\",\"type\":\"invalid_request_error\"}}"
+    },
+    "bad_n_predict_type": {
+      "status": 400,
+      "content_type": "application/json; charset=utf-8",
+      "body": "{\"error\":{\"code\":400,\"message\":\"Field 'n_predict': [json.exception.type_error.302] type must be number, but is string\",\"type\":\"invalid_request_error\"}}"
+    },
+    "unknown_path": {
+      "status": 404,
+      "content_type": "application/json; charset=utf-8",
+      "body": "{\"error\":{\"message\":\"File Not Found\",\"type\":\"not_found_error\",\"code\":404}}"
+    }
+  }
+}

@@ -1,0 +1,30 @@
+[package]
+name = "sllm-server"
+version = "0.2.0"
+edition = "2021"
+description = "SLLM HTTP API server: llama-server compatible /completion, OpenAI /v1/completions and /v1/agents over an Engine trait (FakeEngine in task 5a)"
+publish = false
+
+[lib]
+name = "sllm_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sllm-server"
+path = "src/main.rs"
+
+[dependencies]
+sllm-core = { path = "../sllm-core" }
+llama-ref = { path = "../llama-ref" }
+axum = { version = "=0.8.9", default-features = false, features = ["http1", "json", "tokio", "query"] }
+tokio = { version = "=1.54.1", features = ["rt-multi-thread", "net", "sync", "time", "macros", "signal"] }
+tokio-stream = { version = "=0.1.19", default-features = false }
+futures-util = { version = "=0.3.34", default-features = false, features = ["std"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = { version = "=1.0.154", features = ["preserve_order"] }
+# the GGUF chat template, for events framed as tool results (chat.rs)
+minijinja = { version = "=3.0.1", default-features = false, features = ["builtins", "serde", "loop_controls", "macros", "adjacent_loop_items", "std_collections", "preserve_order"] }
+minijinja-contrib = { version = "=3.0.1", features = ["pycompat"] }
+
+[dev-dependencies]
+reqwest = { version = "=0.13.5", default-features = false, features = ["json", "stream"] }

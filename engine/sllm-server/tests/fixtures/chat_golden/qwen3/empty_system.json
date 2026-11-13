@@ -1,0 +1,44 @@
+{
+ "family": "qwen3",
+ "gguf": "Qwen3-4B-Q4_0.gguf",
+ "conversation": "empty_system",
+ "messages": [
+  {
+   "role": "system",
+   "content": ""
+  },
+  {
+   "role": "user",
+   "content": "What is 2+2?"
+  }
+ ],
+ "tools": [],
+ "prompt": "<|im_start|>system\n<|im_end|>\n<|im_start|>user\nWhat is 2+2?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+ "tokens": [
+  151644,
+  8948,
+  198,
+  151645,
+  198,
+  151644,
+  872,
+  198,
+  3838,
+  374,
+  220,
+  17,
+  10,
+  17,
+  30,
+  151645,
+  198,
+  151644,
+  77091,
+  198,
+  151667,
+  271,
+  151668,
+  271
+ ],
+ "server_prompt_tokens": 24
+}

@@ -1,0 +1,13 @@
+# sllm-server's default thread budget per machine class (phase 1 task 7). Written by engine/scripts/sweep_threads.py
+# --write-config; read by sllm-server (src/threads.rs). The key is machdep.cpu.brand_string plus
+# hw.perflevel0.physicalcpu / hw.perflevel1.physicalcpu. Never the core count: more threads were not faster.
+schema = 1
+
+[machine."Apple M5 Pro/perf0=6/perf1=12"]
+brand = "Apple M5 Pro"
+perf_cores = 6
+efficiency_cores = 12
+threads = 2
+swept = "2026-10-26T11:22:25Z"
+sweep_file = "/Users/benreich/Projects/crazyidea/sllm/results/threads/sweep-20261026T111554Z.jsonl"
+evidence_run_ids = ["sweep-20261026T111554Z/qwen-n2-r1", "sweep-20261026T111554Z/qwen-n4-r1", "sweep-20261026T111554Z/qwen-n6-r1", "sweep-20261026T111554Z/qwen-n8-r1", "sweep-20261026T111554Z/gemma-n2-r1", "sweep-20261026T111554Z/gemma-n4-r1", "sweep-20261026T111554Z/gemma-n6-r1", "sweep-20261026T111554Z/gemma-n8-r1", "sweep-20261026T111554Z/qwen-n4-r2", "sweep-20261026T111554Z/qwen-n6-r2", "sweep-20261026T111554Z/qwen-n8-r2", "sweep-20261026T111554Z/qwen-n2-r2", "sweep-20261026T111554Z/gemma-n4-r2", "sweep-20261026T111554Z/gemma-n6-r2", "sweep-20261026T111554Z/gemma-n8-r2", "sweep-20261026T111554Z/gemma-n2-r2", "sweep-20261026T111554Z/qwen-n6-r3", "sweep-20261026T111554Z/qwen-n8-r3", "sweep-20261026T111554Z/qwen-n2-r3", "sweep-20261026T111554Z/qwen-n4-r3", "sweep-20261026T111554Z/gemma-n6-r3", "sweep-20261026T111554Z/gemma-n8-r3", "sweep-20261026T111554Z/gemma-n2-r3", "sweep-20261026T111554Z/gemma-n4-r3", "sweep-20261026T111554Z/qwen-n8-r4", "sweep-20261026T111554Z/qwen-n2-r4", "sweep-20261026T111554Z/qwen-n4-r4", "sweep-20261026T111554Z/qwen-n6-r4", "sweep-20261026T111554Z/gemma-n8-r4", "sweep-20261026T111554Z/gemma-n2-r4", "sweep-20261026T111554Z/gemma-n4-r4", "sweep-20261026T111554Z/gemma-n6-r4", "sweep-20261026T111554Z/qwen-n2-r5", "sweep-20261026T111554Z/qwen-n4-r5", "sweep-20261026T111554Z/qwen-n6-r5", "sweep-20261026T111554Z/qwen-n8-r5", "sweep-20261026T111554Z/gemma-n2-r5", "sweep-20261026T111554Z/gemma-n4-r5", "sweep-20261026T111554Z/gemma-n6-r5", "sweep-20261026T111554Z/gemma-n8-r5"]

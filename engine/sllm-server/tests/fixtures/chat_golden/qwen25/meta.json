@@ -1,0 +1,10 @@
+{
+ "family": "qwen25",
+ "now_as_utc": 1793377095,
+ "gguf": "Qwen2.5-7B-Instruct-Q4_0.gguf",
+ "llama_server": "b11669-620d2225c",
+ "bos_token": "<|endoftext|>",
+ "eos_token": "<|im_end|>",
+ "chat_template_sha256": "55b2f4a26ac9ee719330a61a0c39d9e538b0e9322212f048326318cff4f8674a",
+ "generations": 4
+}

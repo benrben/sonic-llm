@@ -1,0 +1,126 @@
+{
+ "family": "phi3",
+ "gguf": "Phi-3.5-mini-instruct-Q4_0.gguf",
+ "conversation": "tool_results",
+ "messages": [
+  {
+   "role": "system",
+   "content": "Use tools when useful."
+  },
+  {
+   "role": "user",
+   "content": "Look up café docs and the weather in Zürich."
+  },
+  {
+   "role": "assistant",
+   "content": "",
+   "tool_calls": [
+    {
+     "id": "call_1",
+     "type": "function",
+     "function": {
+      "name": "search_docs",
+      "arguments": "{\"query\": \"caf\\u00e9 \\u65e5\\u672c\", \"limit\": 3, \"filters\": {\"zeta\": 1.5, \"alpha\": [\"b\", \"a\"], \"mid\": {\"b\": true, \"a\": null}}}"
+     }
+    },
+    {
+     "id": "call_2",
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "arguments": "{\"city\": \"Z\\u00fcrich\", \"unit\": \"celsius\"}"
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_1",
+   "content": "3 hits: café.md, menu.md"
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_2",
+   "content": "12 C, clear"
+  },
+  {
+   "role": "assistant",
+   "content": "Found 3 docs; it is 12 C in Zürich."
+  },
+  {
+   "role": "user",
+   "content": "Great."
+  }
+ ],
+ "tools": [],
+ "prompt": "<|system|>\nUse tools when useful.<|end|>\n<|user|>\nLook up café docs and the weather in Zürich.<|end|>\n<|assistant|>\n<|end|>\n<|assistant|>\nFound 3 docs; it is 12 C in Zürich.<|end|>\n<|user|>\nGreat.<|end|>\n<|assistant|>\n",
+ "tokens": [
+  32006,
+  29871,
+  13,
+  11403,
+  8492,
+  746,
+  5407,
+  29889,
+  32007,
+  29871,
+  13,
+  32010,
+  29871,
+  13,
+  14959,
+  701,
+  274,
+  28059,
+  10561,
+  322,
+  278,
+  14826,
+  297,
+  24931,
+  29889,
+  32007,
+  29871,
+  13,
+  32001,
+  29871,
+  13,
+  32007,
+  29871,
+  13,
+  32001,
+  29871,
+  13,
+  9692,
+  29871,
+  29941,
+  10561,
+  29936,
+  372,
+  338,
+  29871,
+  29896,
+  29906,
+  315,
+  297,
+  24931,
+  29889,
+  32007,
+  29871,
+  13,
+  32010,
+  29871,
+  13,
+  25120,
+  271,
+  29889,
+  32007,
+  29871,
+  13,
+  32001,
+  29871,
+  13
+ ],
+ "server_prompt_tokens": 66
+}

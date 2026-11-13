@@ -1,0 +1,10 @@
+{
+ "family": "smollm3",
+ "now_as_utc": 1793377141,
+ "gguf": "SmolLM3-3B-Q4_0.gguf",
+ "llama_server": "b11669-620d2225c",
+ "bos_token": ",",
+ "eos_token": "<|im_end|>",
+ "chat_template_sha256": "68a3faf7ce81c5483069595f9d37bbcbd1d55c9a969e7a00dc5f7675c84b9222",
+ "generations": 4
+}

@@ -1,0 +1,114 @@
+SLLM patch 4/4 (D042): the cascade hooks: kernel source list, library kind, self-test call, FLASH_ATTN_EXT dispatch branch, scratch.
+Against llama.cpp b11669 (source tarball 620d222) after patches 1-3, applied with patch -p1 in ggml/.
+
+--- a/src/ggml-metal/CMakeLists.txt
++++ b/src/ggml-metal/CMakeLists.txt
+@@ -14,6 +14,7 @@
+                          ggml-metal-ops.cpp
+                          ggml-metal-tuning.cpp
+                          ggml-metal-qmm.m
++                         ggml-metal-cascade.m
+                         )
+ 
+ target_link_libraries(ggml-metal PRIVATE
+@@ -75,6 +76,7 @@
+     kernels/pool.metal
+     kernels/misc.metal
+     kernels/qmm.metal
++    kernels/cascade.metal
+ )
+ 
+ if (GGML_METAL_EMBED_LIBRARY)
+--- a/src/ggml-metal/ggml-metal-device.m
++++ b/src/ggml-metal/ggml-metal-device.m
+@@ -6,6 +6,7 @@
+ #import "ggml-metal-impl.h"
+ #import "ggml-metal-common.h"
+ #import "ggml-metal-qmm.h"
++#import "ggml-metal-cascade.h"
+ 
+ #include <Foundation/Foundation.h>
+ 
+@@ -147,7 +148,8 @@
+     X(ARGSORT,         argsort)        \
+     X(POOL,            pool)           \
+     X(MISC,            misc)           \
+-    X(QMM,             qmm)
++    X(QMM,             qmm)            \
++    X(CASCADE,         cascade)
+ 
+ enum ggml_metal_lib_kind {
+ #define X(e, s) GGML_METAL_LIB_##e,
+@@ -366,9 +368,14 @@
+ 
+             t_per_lib[kind] = ggml_time_us() - t0;
+ 
+-            if (!lib && kind == GGML_METAL_LIB_QMM) {
+-                // SLLM patch: a qmm compile failure only disables the qmm path, never the library
+-                ggml_metal_sllm_qmm_note_compile_failure(err_per_lib[kind] ? [[err_per_lib[kind] description] UTF8String] : "unknown");
++            if (!lib && (kind == GGML_METAL_LIB_QMM || kind == GGML_METAL_LIB_CASCADE)) {
++                // SLLM patch: a qmm or cascade compile failure only disables that path, never the library
++                const char * msg = err_per_lib[kind] ? [[err_per_lib[kind] description] UTF8String] : "unknown";
++                if (kind == GGML_METAL_LIB_QMM) {
++                    ggml_metal_sllm_qmm_note_compile_failure(msg);
++                } else {
++                    ggml_metal_sllm_cascade_note_compile_failure(msg);
++                }
+                 [err_per_lib[kind] release];
+                 err_per_lib[kind] = nil;
+                 return;
+@@ -1325,6 +1332,8 @@
+ 
+                 // SLLM patch: read SLLM_QMM and self-test the qmm kernel against a CPU reference
+                 ggml_metal_sllm_qmm_device_init(dev, dev->library, dev->props.has_tensor);
++                // SLLM patch: read SLLM_CASCADE and self-test the cascade kernels against a CPU reference
++                ggml_metal_sllm_cascade_device_init(dev, dev->library, dev->props.has_tensor);
+ 
+                 if (dev->props.use_residency_sets) {
+                     dev->rsets = ggml_metal_rsets_init(dev);
+--- a/src/ggml-metal/ggml-metal-ops.cpp
++++ b/src/ggml-metal/ggml-metal-ops.cpp
+@@ -9,6 +9,7 @@
+ #include "ggml-metal-device.h"
+ #include "ggml-metal-fusion.h"
+ #include "ggml-metal-qmm.h"
++#include "ggml-metal-cascade.h"
+ #include "ggml-metal-tuning.h"
+ 
+ #include <cassert>
+@@ -3434,6 +3435,16 @@
+     ggml_metal_library_t lib = ctx->lib;
+     ggml_metal_encoder_t enc = ctx->enc;
+ 
++    // SLLM patch: shared-prefix decode attention (kernels/cascade.metal) for decode groups that sllm-core hinted
++    {
++        ggml_metal_sllm_cascade_plan plan;
++        if (ggml_metal_sllm_cascade_plan_op(op, &plan) &&
++            ggml_metal_sllm_cascade_encode(lib, enc, &plan, ggml_metal_get_buffer_id(op->src[0]), ggml_metal_get_buffer_id(op->src[1]),
++                ggml_metal_get_buffer_id(op->src[2]), ggml_metal_get_buffer_id(op->src[3]), ggml_metal_get_buffer_id(op))) {
++            return 1;
++        }
++    }
++
+     const ggml_metal_device_props * props_dev = ggml_metal_device_get_props(ctx->dev);
+ 
+     GGML_TENSOR_LOCALS( int32_t, ne0, op->src[0], ne);
+--- a/src/ggml-metal/ggml-metal.cpp
++++ b/src/ggml-metal/ggml-metal.cpp
+@@ -9,6 +9,7 @@
+ #include "ggml-metal-ops.h"
+ #include "ggml-metal-tuning.h"
+ #include "ggml-metal-qmm.h"
++#include "ggml-metal-cascade.h"
+ 
+ #include <mutex>
+ #include <string>
+@@ -241,6 +242,8 @@
+                 res += ggml_metal_op_flash_attn_ext_extra_tmp(tensor);
+                 res += ggml_metal_op_flash_attn_ext_extra_kv_f16(tensor);
+                 res += ggml_metal_op_flash_attn_ext_extra_idx(tensor);
++                // SLLM patch: scratch of the cascade path (block lists, half Q, partials)
++                res += ggml_metal_sllm_cascade_extra(tensor);
+             } break;
+         case GGML_OP_CUMSUM:
+         case GGML_OP_ARGSORT:

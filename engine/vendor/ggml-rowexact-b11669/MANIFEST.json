@@ -1,0 +1,24 @@
+{
+  "what": "libggml-metal 0.27.0 from llama.cpp b11669 + the row-exact patch; every other dylib is the official b11669 binary",
+  "source_commit": "620d222",
+  "source_tarball": "research/inference_runtime/vendor/llama-source.tar.gz",
+  "source_tarball_sha256": "da36b3375b80d9d237e3787ff04fa72887bce2c8eefb717023205e4e6bbdeaad",
+  "patches": [
+    {"file": "patches/0001-sllm-qmm-kernel.patch", "sha256": "8b6ec2f9ff6b9d223f90ab655690503689ec69344053225ae9d77ce9106bbffa"},
+    {"file": "patches/0002-sllm-qmm-hooks.patch", "sha256": "a85276f6e7c3550547da73a86ab86e87941a4d3de8ca9b4fa37fee8d53bc88de"},
+    {"file": "patches/0003-sllm-qmm32.patch", "sha256": "4b05bf0adbe89d98c9744de3acd24f3ecce7f3381fd7a857c40152d4bad6d294"},
+    {"file": "patches/0010-row-exact.patch", "sha256": "681ec9effc7ea360112fb3d3707b73d5a4a7fa28d33c29a5311442474812ef33"},
+    {"file": "patches/0011-sllm-copy-rows.patch", "sha256": "c72eb460c9dc4269328913fa29b86d260fa95f47aa9788c178fb593c39ef3928"},
+    {"file": "patches/0012-sllm-pfa-port.patch", "sha256": "ae8d1d836972a6ceb950cfe47e1f6459e8da12e369441fcd7f35e751c8fb9875"}
+  ],
+  "profile_patches": 0,
+  "build_sh_sha256": "8eba2dc3349e4daf9e936265eb9c6885ec6ec65c32bb7246f7594d455b2b7bfe",
+  "compiler": "Apple clang version 21.0.0 (clang-2100.1.1.101)",
+  "sdk": "26.5",
+  "flags": "-arch arm64 -mmacosx-version-min=13.3 -O3 -fPIC -ffile-prefix-map=<build>/src/= -DNDEBUG -DGGML_METAL_EMBED_LIBRARY -DGGML_BACKEND_BUILD -DGGML_BACKEND_SHARED -DGGML_SHARED -DGGML_BUILD -DGGML_SCHED_MAX_COPIES=4 -D_XOPEN_SOURCE=600 -D_DARWIN_C_SOURCE (-std=gnu11 for .m, -std=gnu++17 for .cpp; -I ggml/include ggml/src ggml/src/ggml-metal)",
+  "embedded_kernels": "fa_aux fa_f16 fa_f32 fa_q4_0 fa_q4_1 fa_q5_0 fa_q5_1 fa_q8_0 fa_tensor fa_vec_f16 fa_vec_f32 fa_vec_q4_0 fa_vec_q4_1 fa_vec_q5_0 fa_vec_q5_1 fa_vec_q8_0 mul_mv mul_mv_mma mul_mm quantize softmax norm unary binbcast reduce tri ssm wkv gated_delta_net solve_tri rope conv upscale argsort pool misc qmm prefill",
+  "outputs": {
+    "lib/libggml-metal.0.27.0.dylib": "037562c595c956e2c3e66e8eb63b3062571fc73733d950ea518a8b00b3d32288"
+  },
+  "official_copies_verified_against": "engine/vendor/ggml-b11669/SHA256SUMS"
+}

@@ -1,0 +1,40 @@
+{
+ "family": "mistral",
+ "gguf": "Mistral-7B-Instruct-v0.3-Q4_K_M.gguf",
+ "conversation": "system_user",
+ "messages": [
+  {
+   "role": "system",
+   "content": "You are a terse assistant."
+  },
+  {
+   "role": "user",
+   "content": "What is 2+2?"
+  }
+ ],
+ "tools": [],
+ "prompt": "[INST] You are a terse assistant.\nWhat is 2+2? [/INST]",
+ "tokens": [
+  1,
+  3,
+  29473,
+  1763,
+  1228,
+  1032,
+  4404,
+  1099,
+  14660,
+  29491,
+  781,
+  3963,
+  1117,
+  29473,
+  29518,
+  29574,
+  29518,
+  29572,
+  29473,
+  4
+ ],
+ "server_prompt_tokens": 20
+}

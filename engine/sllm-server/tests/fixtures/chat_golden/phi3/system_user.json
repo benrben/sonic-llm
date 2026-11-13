@@ -1,0 +1,49 @@
+{
+ "family": "phi3",
+ "gguf": "Phi-3.5-mini-instruct-Q4_0.gguf",
+ "conversation": "system_user",
+ "messages": [
+  {
+   "role": "system",
+   "content": "You are a terse assistant."
+  },
+  {
+   "role": "user",
+   "content": "What is 2+2?"
+  }
+ ],
+ "tools": [],
+ "prompt": "<|system|>\nYou are a terse assistant.<|end|>\n<|user|>\nWhat is 2+2?<|end|>\n<|assistant|>\n",
+ "tokens": [
+  32006,
+  29871,
+  13,
+  3492,
+  526,
+  263,
+  1935,
+  344,
+  20255,
+  29889,
+  32007,
+  29871,
+  13,
+  32010,
+  29871,
+  13,
+  5618,
+  338,
+  29871,
+  29906,
+  29974,
+  29906,
+  29973,
+  32007,
+  29871,
+  13,
+  32001,
+  29871,
+  13
+ ],
+ "server_prompt_tokens": 29
+}

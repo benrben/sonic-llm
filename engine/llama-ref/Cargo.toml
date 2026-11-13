@@ -1,0 +1,25 @@
+[package]
+name = "llama-ref"
+version = "0.1.0"
+edition = "2021"
+description = "llama.cpp b11669 reference side of the SLLM parity harness: all-position logits, greedy tokens, tokenizer"
+publish = false
+
+[lib]
+name = "llama_ref"
+path = "src/lib.rs"
+
+[[bin]]
+name = "llama-ref"
+path = "src/bin/llama-ref.rs"
+
+[features]
+# Regenerate src/sys.rs from the vendored llama.h with bindgen (needs libclang).
+regen-bindings = ["dep:bindgen"]
+
+[dependencies]
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+
+[build-dependencies]
+bindgen = { version = "=0.73.2", optional = true }

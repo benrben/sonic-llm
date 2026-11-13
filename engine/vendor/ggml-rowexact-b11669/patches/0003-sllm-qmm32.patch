@@ -1,0 +1,752 @@
+SLLM patch 10 (phase2-qmm32, phase2-qmm32b): qmm with one accumulation order for every row count. kernel_sllm_qmm_ks
+(kernels/qmm.metal) takes every Q4_0 / Q4_1 mat-mul with N >= 2 src1 rows (N = 1 stays on ggml's mat-vec): one
+threadgroup per 32 weight rows x 16 or 32 token rows (bitwise the same per-row results), its 4 or 8 simdgroups split K
+inside the threadgroup (contiguous or interleaved slices) and sum their partials in threadgroup memory, so there is no
+grid split-K scratch and no reduce dispatch; the weights are matmul2d's left operand, whose register layout gives each
+lane 4-byte runs of a row; above 64 rows two 32-row tiles share a threadgroup (and its activation reads), with the
+same per-row arithmetic, so prefill chunks are not slower than ggml's mul_mm (phase2-qmm32b). kernel_sllm_qmm_q6p takes Q6_K (the LM heads, 2..128 rows) with the K
+order permuted inside each 32-K chunk so every lane loads whole words of ql/qh (activations staged as half in the same
+order). ggml-metal-qmm.{h,m}: plan field ks, args field pad renamed flags (same layout), SLLM_QMM32 / SLLM_QMM32_G /
+SLLM_QMM32_IL / SLLM_QMM32_Q6, the self-test extended to both kernels (with a bitwise row-count check), status
+field "qmm32".
+Against llama.cpp b11669 (source tarball 620d222) after patches 0001..0009, applied with patch -p1 in ggml/.
+--- a/src/ggml-metal/ggml-metal-qmm.h
+--- a/src/ggml-metal/ggml-metal-qmm.h
++++ b/src/ggml-metal/ggml-metal-qmm.h
+@@ -22,7 +22,7 @@
+     int32_t ldx;    // floats per src1 row
+     int32_t ldd;    // floats per dst row
+     int32_t ksplit; // K length of one split-K slice (grid z)
+-    int32_t pad;
++    int32_t flags;  // kernel_sllm_qmm_ks (patch 10): bit 0 = interleaved K slices
+ } ggml_metal_kargs_sllm_qmm;
+ 
+ 
+@@ -30,6 +30,9 @@
+     enum ggml_type type; // GGML_TYPE_Q4_0, GGML_TYPE_Q4_1 or GGML_TYPE_Q6_K
+     int nt;              // token rows per threadgroup: 16 or 32
+     int S;               // split-K slices (1 = none); slices 1..S-1 live in the extra space after dst
++    int ks;              // patch 10: 0 = kernel_sllm_qmm; 4 or 8 = kernel_sllm_qmm_ks with that many in-threadgroup K slices;
++                         //           1 = kernel_sllm_qmm_q6p (Q6_K)
++    int rt;              // patch 10: kernel_sllm_qmm_ks row tiles of 32 rows per threadgroup (1, or 2 above 64 rows)
+     ggml_metal_kargs_sllm_qmm args;
+ };
+ 
+--- a/src/ggml-metal/ggml-metal-qmm.m
++++ b/src/ggml-metal/ggml-metal-qmm.m
+@@ -6,6 +6,29 @@
+ //   "force"       test only: ignore the N table (any N >= 2), keep the type and layout conditions
+ // SLLM_QMM_TRACE=1 logs every qmm dispatch (type, K, M, N, tile, split) at info level (tests only: it is per encode).
+ //
++// Patch 10 (phase2-qmm32, phase2-qmm32b), kernel_sllm_qmm_ks: Q4_0 / Q4_1 take one 16- (N <= 16) or 32-token tile per
++// threadgroup of 32 weight rows, split over K inside the threadgroup (no grid split-K, no scratch, no reduce), and
++// Q6_K takes kernel_sllm_qmm_q6p, for every N of the dispatch table. One kernel and one accumulation order per (type,
++// shape) for every row count: a token's result does not depend on how many rows its step has (the self-test checks
++// that bitwise; ggml's own kernels at N <= 8 and N = 1 are a different order, as before patch 10).
++//   SLLM_QMM32    unset or "1": on; "0": off (every qmm matmul goes back to kernel_sllm_qmm + split-K, the A/B switch)
++//   SLLM_QMM32_G  "4" or "8": force the K slices per threadgroup (default: 8 when M <= 1024 rows, else 4)
++//   SLLM_QMM32_IL "0" or "1": force contiguous / interleaved K slices (default: interleaved)
++//   SLLM_QMM32_MAXN N: Q4 mat-muls with more than N rows go to ggml (e.g. 128: prefill chunks on ggml's mul_mm, which
++//                 is faster there, at the price of row-count dependence between prefill-sized and smaller steps)
++//   SLLM_QMM32_RT "1" or "2": force the 32-row tiles per threadgroup above 64 rows (default: 2 when K >= 2048; the
++//                 bits are the same either way)
++//   SLLM_QMM32_N1 "1": single-row mat-muls (batch-1 decode) take the qmm kernels too, so an agent alone computes
++//                 bitwise what it computes in a batch (default: ggml's mat-vec, faster for one row and llama.cpp's)
++//   SLLM_QMM32_Q6 "0": Q6_K keeps kernel_sllm_qmm (default: kernel_sllm_qmm_q6p for Q6_K rows whose byte stride is a
++//                 multiple of 4 and 4-byte aligned weights, else kernel_sllm_qmm without split-K; the activations are
++//                 rounded to half by the kernel (round to nearest) instead of inside matmul2d)
++// The defaults are the per-op minima of the decode step profile (sllm/results/phase2-qmm32, SLLM_METAL_NODEPROF) on
++// Qwen3-0.6B and Gemma-3-4B: 8 slices only pay off when there are few row tiles (M = 1024: 32 threadgroups), and
++// interleaved slices were equal or better on 15 of the 16 (shape, G) cells.
++//
++// Dispatch table with SLLM_QMM32 on (the default, patch 10): Q4_0 / Q4_1 for N >= 2, Q6_K for 2 <= N <= 128 (see
++// sllm_qmm_n_in_table: one accumulation order for every row count). With SLLM_QMM32=0, the table of patch 0001:
+ // Dispatch table (sllm/results/phase2-qmm, cold weights, the faster of qmm and ggml per type and N, both models):
+ //   Q4_0, Q4_1: qmm for 9 <= N <= 128 (ggml's f32 MMA mat-vec wins at N = 8; N > 128 is unmeasured, so ggml)
+ //   Q6_K:       qmm for 9 <= N <= 64  (ggml wins at N = 8 and N = 128; qmm's cost grows per 32-row tile)
+@@ -28,6 +51,7 @@
+ #define SLLM_QMM_TM 64
+ #define SLLM_QMM_KC 32
+ #define SLLM_QMM_NTHREADS 64 // 2 simdgroups
++#define SLLM_QMM_RT2_MIN_N 64 // patch 10: above this many rows kernel_sllm_qmm_ks takes 2 row tiles per threadgroup
+ 
+ enum sllm_qmm_mode { SLLM_QMM_MODE_AUTO = 0, SLLM_QMM_MODE_OFF = 1, SLLM_QMM_MODE_FORCE = 2 };
+ 
+@@ -46,6 +70,14 @@
+     double selftest_worst_max_rel;
+     double selftest_ms;
+     atomic_ullong dispatches;
++    bool ks_on;      // patch 10 path enabled
++    int  ks_g;       // 0 = rule, else forced 4 / 8
++    int  ks_il;      // -1 = rule, else forced 0 / 1
++    bool q6_on;      // kernel_sllm_qmm_q6p enabled
++    int  ks_maxn;    // SLLM_QMM32_MAXN: largest Q4 row count for qmm (0 = no limit)
++    int  ks_minn;    // SLLM_QMM32_N1=1: N = 1 too (default: from 2)
++    int  ks_rt;      // SLLM_QMM32_RT: 1 / 2 row tiles above 64 rows (0 = rule: 2 when K >= 2048)
++    atomic_ullong ks_dispatches;
+ } g_qmm;
+ 
+ void ggml_metal_sllm_qmm_note_compile_failure(const char * msg) {
+@@ -57,6 +89,17 @@
+     if (g_qmm.mode == SLLM_QMM_MODE_FORCE) {
+         return n >= 2;
+     }
++    if (g_qmm.ks_on) {
++        // patch 10 (phase2-qmm32b): every row count from 2 up takes the same kernel and accumulation order, so a
++        // token's result does not depend on the rows its step happens to have (decode rows next to a prefill chunk,
++        // chunk sizes, joins and leaves). N = 1 stays on ggml's mat-vec (batch-1 byte identity, llama.cpp parity).
++        switch (type) {
++            case GGML_TYPE_Q4_0:
++            case GGML_TYPE_Q4_1: return n >= g_qmm.ks_minn && (g_qmm.ks_maxn <= 0 || n <= g_qmm.ks_maxn);
++            case GGML_TYPE_Q6_K: return n >= g_qmm.ks_minn && n <= 128;   // above: all-logits runs only (perplexity), ggml is faster
++            default:             return false;
++        }
++    }
+     switch (type) {
+         case GGML_TYPE_Q4_0:
+         case GGML_TYPE_Q4_1: return n >= 9 && n <= 128;
+@@ -79,11 +122,32 @@
+     return S;
+ }
+ 
++// patch 10: the decode-width path's K slices per threadgroup and slice order (0 when the path does not apply)
++static int sllm_qmm_ks_pick(enum ggml_type type, int64_t M, int64_t N, int64_t nb01, int * il) {
++    (void) N;   // the same kernel for every N of the table (row-count independence)
++    if (!g_qmm.ks_on) {
++        return 0;
++    }
++    if (type == GGML_TYPE_Q6_K) {
++        *il = 0;
++        return g_qmm.q6_on && nb01 % 4 == 0 ? 1 : 0;
++    }
++    if (type != GGML_TYPE_Q4_0 && type != GGML_TYPE_Q4_1) {
++        return 0;
++    }
++    const int G = g_qmm.ks_g ? g_qmm.ks_g : (M <= 1024 ? 8 : 4);
++    *il = g_qmm.ks_il >= 0 ? g_qmm.ks_il : 1;
++    return G;
++}
++
++// ks: -1 = by the rule above, 0 = kernel_sllm_qmm, 4 / 8 = kernel_sllm_qmm_ks (il = slice order), 1 = kernel_sllm_qmm_q6p;
++// S as before
+ static void sllm_qmm_fill_plan(struct ggml_metal_sllm_qmm_plan * p, enum ggml_type type, int64_t K, int64_t M, int64_t N,
+-        int64_t nb01, int64_t ldx, int S) {
++        int64_t nb01, int64_t ldx, int S, int ks, int il) {
+     p->type = type;
++    p->ks   = ks >= 0 ? ks : sllm_qmm_ks_pick(type, M, N, nb01, &il);
+     p->nt   = N <= 16 ? 16 : 32;
+-    p->S    = S > 0 ? S : sllm_qmm_pick_split(K, M, N, p->nt);
++    p->S    = p->ks ? 1 : S > 0 ? S : sllm_qmm_pick_split(K, M, N, p->nt);
+     p->args.K      = (int32_t) K;
+     p->args.M      = (int32_t) M;
+     p->args.N      = (int32_t) N;
+@@ -91,7 +155,9 @@
+     p->args.ldx    = (int32_t) ldx;
+     p->args.ldd    = (int32_t) M;
+     p->args.ksplit = (int32_t) (K/p->S);
+-    p->args.pad    = 0;
++    p->args.flags  = p->ks ? (il ? 1 : 0) : 0;
++    // prefill row counts: two 32-row tiles per threadgroup share the activation reads (same per-row arithmetic)
++    p->rt   = (p->ks > 1 && N > SLLM_QMM_RT2_MIN_N && (g_qmm.ks_rt ? g_qmm.ks_rt == 2 : K >= 2048)) ? 2 : 1;
+ }
+ 
+ bool ggml_metal_sllm_qmm_plan_op(const struct ggml_tensor * op, struct ggml_metal_sllm_qmm_plan * plan) {
+@@ -139,7 +205,7 @@
+     }
+ 
+     if (plan) {
+-        sllm_qmm_fill_plan(plan, type, K, M, N, (int64_t) src0->nb[1], (int64_t) (src1->nb[1]/sizeof(float)), 0);
++        sllm_qmm_fill_plan(plan, type, K, M, N, (int64_t) src0->nb[1], (int64_t) (src1->nb[1]/sizeof(float)), 0, -1, 0);
+     }
+     return true;
+ }
+@@ -175,7 +241,23 @@
+         return false;
+     }
+     char base[64];
+-    snprintf(base, sizeof(base), "kernel_sllm_qmm_%s_nt%d", sllm_qmm_type_name(plan->type), plan->nt);
++    struct ggml_metal_sllm_qmm_plan p1;
++    if (plan->ks == 1 && w.offs % 4 != 0) {
++        // kernel_sllm_qmm_q6p loads 4-byte words: misaligned weights take kernel_sllm_qmm (no split-K: no scratch)
++        p1 = *plan;
++        p1.ks = 0;
++        p1.S = 1;
++        p1.args.ksplit = p1.args.K;
++        p1.args.flags = 0;
++        plan = &p1;
++    }
++    if (plan->ks == 1) {
++        snprintf(base, sizeof(base), "kernel_sllm_qmm_q6p_nt%d", plan->nt);
++    } else if (plan->ks) {
++        snprintf(base, sizeof(base), "kernel_sllm_qmm_ks_%s_g%d_nt%d_r%d", sllm_qmm_type_name(plan->type), plan->ks, plan->nt, plan->rt);
++    } else {
++        snprintf(base, sizeof(base), "kernel_sllm_qmm_%s_nt%d", sllm_qmm_type_name(plan->type), plan->nt);
++    }
+     struct ggml_metal_pipeline_with_params ppl = sllm_qmm_get_pipeline(lib, base);
+     if (!ppl.pipeline) {
+         return false;
+@@ -195,8 +277,19 @@
+     ggml_metal_encoder_set_buffer  (enc, w, 1);
+     ggml_metal_encoder_set_buffer  (enc, x, 2);
+     ggml_metal_encoder_set_buffer  (enc, d, 3);
+-    ggml_metal_encoder_dispatch_threadgroups(enc, (args.N + plan->nt - 1)/plan->nt, (args.M + SLLM_QMM_TM - 1)/SLLM_QMM_TM, plan->S,
+-            SLLM_QMM_NTHREADS, 1, 1);
++    if (plan->ks == 1) {
++        // one threadgroup per 128 weight rows x nt token rows, 4 simdgroups
++        ggml_metal_encoder_dispatch_threadgroups(enc, (args.N + plan->nt - 1)/plan->nt, (args.M + 127)/128, 1, 128, 1, 1);
++        atomic_fetch_add(&g_qmm.ks_dispatches, 1);
++    } else if (plan->ks) {
++        // one threadgroup per rt x 32 weight rows x nt token rows, rt x plan->ks simdgroups (row tiles x K slices)
++        ggml_metal_encoder_dispatch_threadgroups(enc, (args.N + plan->nt - 1)/plan->nt, (args.M + 32*plan->rt - 1)/(32*plan->rt), 1,
++                32*plan->ks*plan->rt, 1, 1);
++        atomic_fetch_add(&g_qmm.ks_dispatches, 1);
++    } else {
++        ggml_metal_encoder_dispatch_threadgroups(enc, (args.N + plan->nt - 1)/plan->nt, (args.M + SLLM_QMM_TM - 1)/SLLM_QMM_TM, plan->S,
++                SLLM_QMM_NTHREADS, 1, 1);
++    }
+ 
+     if (plan->S > 1) {
+         // the reduce reads every slice: wait for the partials
+@@ -211,14 +304,18 @@
+ 
+     atomic_fetch_add(&g_qmm.dispatches, 1);
+     if (g_qmm.trace) {
+-        GGML_LOG_INFO("sllm_qmm: %s K=%d M=%d N=%d nt=%d S=%d\n", sllm_qmm_type_name(plan->type), args.K, args.M, args.N, plan->nt, plan->S);
++        GGML_LOG_INFO("sllm_qmm: %s K=%d M=%d N=%d nt=%d S=%d ks=%d il=%d rt=%d\n", sllm_qmm_type_name(plan->type), args.K, args.M, args.N,
++                plan->nt, plan->S, plan->ks, args.flags & 1, plan->rt);
+     }
+     return true;
+ }
+ 
+ //
+-// self-test: every type, a partial row tile (M = 96), both token tiles (N = 16, 20) and split-K (N = 40, S = 4),
+-// against a CPU reference that dequantizes exactly as ggml's dequantize_row_* and accumulates in double
++// self-test: every type, a partial row tile (M = 96), both token tiles (N = 16, 20) and split-K (N = 40, S = 4) of
++// kernel_sllm_qmm, plus (patch 10) kernel_sllm_qmm_ks for Q4_0 / Q4_1: both slice counts and orders, a partial 32-row
++// tile (M = 80), a partial token tile (N = 17, 20), even and uneven K slices (K = 512, 352), and kernel_sllm_qmm_q6p
++// for Q6_K (even and odd blocks, partial 128-row tiles), against a CPU reference
++// that dequantizes exactly as ggml's dequantize_row_* and accumulates in double
+ //
+ 
+ static uint64_t sllm_rng(uint64_t * s) {
+@@ -294,9 +391,16 @@
+ 
+ static bool sllm_qmm_selftest(ggml_metal_device_t dev, ggml_metal_library_t lib, char * why, size_t why_n) {
+     const enum ggml_type types[3] = { GGML_TYPE_Q4_0, GGML_TYPE_Q4_1, GGML_TYPE_Q6_K };
+-    const int K = 512, M = 96;
+-    const int Ns[3] = { 16, 20, 40 };
+-    const int Ss[3] = { 1, 1, 4 };
++    // { K, M, N, S, ks, il }: kernel_sllm_qmm (ks = 0) for every type, kernel_sllm_qmm_ks (ks = 4 / 8) for Q4_0 / Q4_1
++    // and kernel_sllm_qmm_q6p (ks = 1) for Q6_K: even and odd blocks (K = 512, 1024; the row stride stays a multiple of
++    // 4 bytes, which the dispatch rule requires), partial 128-row tiles (M = 80, 200)
++    enum { NCASES = 11 };
++    const int cs[NCASES][6] = {
++        { 512, 96, 16, 1, 0, 0 }, { 512, 96, 20, 1, 0, 0 }, { 512, 96, 40, 4, 0, 0 },
++        { 512, 80, 32, 1, 4, 0 }, { 512, 80, 20, 1, 8, 1 }, { 352, 80, 32, 1, 8, 0 },
++        { 352, 80, 17, 1, 4, 1 }, { 352, 80, 32, 1, 8, 1 },
++        { 512, 80, 32, 1, 1, 0 }, { 1024, 200, 17, 1, 1, 0 }, { 1024, 200, 32, 1, 1, 0 },
++    };
+ 
+     id<MTLDevice> device = (id<MTLDevice>) ggml_metal_device_get_obj(dev);
+     if (!device) {
+@@ -317,9 +421,12 @@
+         }
+         for (int ti = 0; ti < 3 && ok; ++ti) {
+             const enum ggml_type t = types[ti];
+-            const size_t rb = (size_t) (K/sllm_block_k(t))*sllm_block_bytes(t);
+-            for (int ci = 0; ci < 3 && ok; ++ci) {
+-                const int N = Ns[ci], S = Ss[ci];
++            for (int ci = 0; ci < NCASES && ok; ++ci) {
++                const int K = cs[ci][0], M = cs[ci][1], N = cs[ci][2], S = cs[ci][3], KS = cs[ci][4], IL = cs[ci][5];
++                if ((KS > 1 && t == GGML_TYPE_Q6_K) || (KS == 1 && t != GGML_TYPE_Q6_K) || K % sllm_block_k(t) != 0) {
++                    continue;
++                }
++                const size_t rb = (size_t) (K/sllm_block_k(t))*sllm_block_bytes(t);
+                 uint64_t seed = 0x5EED0000ull + 131*ti + ci;
+                 id<MTLBuffer> bw = [device newBufferWithLength:rb*M options:MTLResourceStorageModeShared];
+                 id<MTLBuffer> bx = [device newBufferWithLength:(size_t) N*K*sizeof(float) options:MTLResourceStorageModeShared];
+@@ -337,7 +444,7 @@
+                     for (int i = 0; i < S*N*M; ++i) d[i] = NAN;
+ 
+                     struct ggml_metal_sllm_qmm_plan plan;
+-                    sllm_qmm_fill_plan(&plan, t, K, M, N, (int64_t) rb, K, S);
++                    sllm_qmm_fill_plan(&plan, t, K, M, N, (int64_t) rb, K, S, KS, IL);
+ 
+                     id<MTLCommandBuffer> cb = [queue commandBuffer];
+                     ggml_metal_encoder_t enc = ggml_metal_encoder_init((ggml_metal_cmd_buf_t) cb, false);
+@@ -346,7 +453,7 @@
+                     ggml_metal_encoder_end_encoding(enc);
+                     ggml_metal_encoder_free(enc);
+                     if (!enc_ok) {
+-                        snprintf(why, why_n, "pipeline for %s nt%d not available", sllm_qmm_type_name(t), plan.nt);
++                        snprintf(why, why_n, "pipeline for %s nt%d ks%d not available", sllm_qmm_type_name(t), plan.nt, plan.ks);
+                         ok = false;
+                     } else {
+                         [cb commit];
+@@ -380,8 +487,8 @@
+                         if (max_rel > worst_max) worst_max = max_rel;
+                         ++cases;
+                         if (!finite || !(rel_rms < 3e-3) || !(max_rel < 1e-2)) {
+-                            snprintf(why, why_n, "mismatch %s K=%d M=%d N=%d S=%d: rel_rms %.3g, max_abs/max_ref %.3g%s",
+-                                     sllm_qmm_type_name(t), K, M, N, S, rel_rms, max_rel, finite ? "" : ", non-finite output");
++                            snprintf(why, why_n, "mismatch %s K=%d M=%d N=%d S=%d ks=%d il=%d: rel_rms %.3g, max_abs/max_ref %.3g%s",
++                                     sllm_qmm_type_name(t), K, M, N, S, KS, IL, rel_rms, max_rel, finite ? "" : ", non-finite output");
+                             ok = false;
+                         }
+                     }
+@@ -389,6 +496,59 @@
+                 [bw release]; [bx release]; [bd release];
+             }
+         }
++        // row-count independence: the same weights and activation rows at N = 512, 256, 130 (two row tiles per
++        // threadgroup above 64 rows), 40, 32, 20, 12 and 3 (16-token tiles) must give bitwise the same outputs on the
++        // rows they share; the activations include values in half's denormal range, beyond half's range and zeros
++        // (matmul2d rounds an f32 operand's mantissa toward zero but keeps its exponent)
++        for (int ti = 0; ti < 3 && ok; ++ti) {
++            const enum ggml_type t = types[ti];
++            const int K = 512, M = 80, KS = t == GGML_TYPE_Q6_K ? 1 : (ti == 0 ? 8 : 4);
++            enum { NR = 8 };
++            const int rt_mode = g_qmm.ks_rt;
++            g_qmm.ks_rt = 2;   // above 64 rows: two row tiles per threadgroup whatever K, so both forms are compared
++            const int Nr[NR] = { 512, 256, 130, 40, 32, 20, 12, 3 };
++            const size_t rb = (size_t) (K/sllm_block_k(t))*sllm_block_bytes(t);
++            uint64_t seed = 0x5EEDF00Dull + 17*ti;
++            id<MTLBuffer> bw = [device newBufferWithLength:rb*M options:MTLResourceStorageModeShared];
++            id<MTLBuffer> bx = [device newBufferWithLength:(size_t) Nr[0]*K*sizeof(float) options:MTLResourceStorageModeShared];
++            id<MTLBuffer> bd[NR];
++            for (int r = 0; r < NR; ++r) bd[r] = [device newBufferWithLength:(size_t) Nr[r]*M*sizeof(float) options:MTLResourceStorageModeShared];
++            uint8_t * w = (uint8_t *) [bw contents];
++            float   * x = (float *)   [bx contents];
++            for (int m = 0; m < M; ++m) sllm_fill_row(t, w + (size_t) m*rb, K, &seed);
++            for (int i = 0; i < Nr[0]*K; ++i) {
++                x[i] = 2.0f*sllm_rngf(&seed) - 1.0f;
++                if (i % 7 == 0) x[i] *= 3e-5f;
++                if (i % 101 == 3) x[i] *= 1e5f;
++                if (i % 997 == 5) x[i] = 0.0f;
++            }
++            for (int r = 0; r < NR && ok; ++r) {
++                struct ggml_metal_sllm_qmm_plan plan;
++                sllm_qmm_fill_plan(&plan, t, K, M, Nr[r], (int64_t) rb, K, 1, KS, 1);
++                id<MTLCommandBuffer> cb = [queue commandBuffer];
++                ggml_metal_encoder_t enc = ggml_metal_encoder_init((ggml_metal_cmd_buf_t) cb, false);
++                const struct ggml_metal_buffer_id iw = { (void *) bw, 0 }, ix = { (void *) bx, 0 }, id_ = { (void *) bd[r], 0 };
++                const bool enc_ok = ggml_metal_sllm_qmm_encode(lib, enc, &plan, iw, ix, id_);
++                ggml_metal_encoder_end_encoding(enc);
++                ggml_metal_encoder_free(enc);
++                if (!enc_ok) {
++                    snprintf(why, why_n, "row-count check: pipeline for %s nt%d ks%d not available", sllm_qmm_type_name(t), plan.nt, plan.ks);
++                    ok = false;
++                    break;
++                }
++                [cb commit];
++                [cb waitUntilCompleted];
++                if (r > 0 && memcmp([bd[r] contents], [bd[0] contents], (size_t) Nr[r]*M*sizeof(float)) != 0) {
++                    snprintf(why, why_n, "row-count check: %s ks=%d N=%d differs bitwise from N=512 on the shared rows",
++                             sllm_qmm_type_name(t), KS, Nr[r]);
++                    ok = false;
++                }
++                ++cases;
++            }
++            g_qmm.ks_rt = rt_mode;
++            [bw release]; [bx release];
++            for (int r = 0; r < NR; ++r) [bd[r] release];
++        }
+         [queue release];
+     }
+ 
+@@ -407,6 +567,23 @@
+     g_qmm.active = false;
+     atomic_store(&g_qmm.dispatches, 0);
+ 
++    {
++        const char * e32 = getenv("SLLM_QMM32");
++        const char * eg  = getenv("SLLM_QMM32_G");
++        const char * eil = getenv("SLLM_QMM32_IL");
++        const char * eq6 = getenv("SLLM_QMM32_Q6");
++        g_qmm.q6_on = !(eq6 && strcmp(eq6, "0") == 0);
++        const char * emx = getenv("SLLM_QMM32_MAXN");
++        g_qmm.ks_maxn = emx ? atoi(emx) : 0;
++        const char * en1 = getenv("SLLM_QMM32_N1");
++        g_qmm.ks_minn = (en1 && strcmp(en1, "1") == 0) ? 1 : 2;
++        const char * ert = getenv("SLLM_QMM32_RT");
++        g_qmm.ks_rt = (ert && (strcmp(ert, "1") == 0 || strcmp(ert, "2") == 0)) ? atoi(ert) : 0;
++        g_qmm.ks_on = !(e32 && strcmp(e32, "0") == 0);
++        g_qmm.ks_g  = (eg && (strcmp(eg, "4") == 0 || strcmp(eg, "8") == 0)) ? atoi(eg) : 0;
++        g_qmm.ks_il = (eil && (strcmp(eil, "0") == 0 || strcmp(eil, "1") == 0)) ? atoi(eil) : -1;
++        atomic_store(&g_qmm.ks_dispatches, 0);
++    }
+     const char * tr = getenv("SLLM_QMM_TRACE");
+     const char * env = getenv("SLLM_QMM");
+     if (env && strcmp(env, "0") == 0) {
+@@ -437,12 +614,13 @@
+         }
+         // the self-test's own dispatches are not counted
+         atomic_store(&g_qmm.dispatches, 0);
++        atomic_store(&g_qmm.ks_dispatches, 0);
+     }
+     g_qmm.trace = tr && strcmp(tr, "1") == 0;
+ 
+     if (g_qmm.active) {
+-        GGML_LOG_INFO("%s: SLLM qmm active (mode %s; self-test %d cases, worst rel rms %.2e, worst max/ref %.2e, %.1f ms)\n",
+-                __func__, g_qmm.mode == SLLM_QMM_MODE_FORCE ? "force" : "auto", g_qmm.selftest_cases,
++        GGML_LOG_INFO("%s: SLLM qmm active (mode %s, qmm32 %s; self-test %d cases, worst rel rms %.2e, worst max/ref %.2e, %.1f ms)\n",
++                __func__, g_qmm.mode == SLLM_QMM_MODE_FORCE ? "force" : "auto", g_qmm.ks_on ? "on" : "off", g_qmm.selftest_cases,
+                 g_qmm.selftest_worst_rel_rms, g_qmm.selftest_worst_max_rel, g_qmm.selftest_ms);
+     } else if (g_qmm.mode == SLLM_QMM_MODE_OFF) {
+         GGML_LOG_INFO("%s: SLLM qmm off (%s)\n", __func__, g_qmm.reason);
+@@ -452,7 +630,7 @@
+ }
+ 
+ const char * ggml_backend_metal_sllm_qmm_status(void) {
+-    static _Thread_local char buf[1024];
++    static _Thread_local char buf[1536];
+     char reason[300];
+     // the reason is free text: keep it JSON-safe
+     size_t j = 0;
+@@ -465,11 +643,16 @@
+     snprintf(buf, sizeof(buf),
+         "{\"patch\":\"sllm-qmm-1\",\"initialized\":%s,\"active\":%s,\"mode\":\"%s\",\"reason\":\"%s\","
+         "\"selftest\":{\"ran\":%s,\"pass\":%s,\"cases\":%d,\"worst_rel_rms\":%.3e,\"worst_max_rel\":%.3e,\"ms\":%.2f},"
+-        "\"table\":\"q4_0,q4_1: 9<=N<=128; q6_K: 9<=N<=64\",\"dispatches\":%llu}",
++        "\"table\":\"q4_0,q4_1: 9<=N<=128; q6_K: 9<=N<=64\",\"dispatches\":%llu,"
++        "\"qmm32\":{\"patch\":\"sllm-qmm32-1\",\"on\":%s,\"g\":\"%s\",\"il\":\"%s\",\"q6\":%s,"
++        "\"table\":\"q4_0,q4_1: N>=2; q6_K: 2<=N<=128 (one order for every N)\",\"dispatches\":%llu}}",
+         g_qmm.initialized ? "true" : "false", g_qmm.active ? "true" : "false",
+         g_qmm.mode == SLLM_QMM_MODE_OFF ? "off" : g_qmm.mode == SLLM_QMM_MODE_FORCE ? "force" : "auto", reason,
+         g_qmm.selftest_ran ? "true" : "false", g_qmm.selftest_pass ? "true" : "false", g_qmm.selftest_cases,
+         g_qmm.selftest_worst_rel_rms, g_qmm.selftest_worst_max_rel, g_qmm.selftest_ms,
+-        (unsigned long long) atomic_load(&g_qmm.dispatches));
++        (unsigned long long) atomic_load(&g_qmm.dispatches),
++        g_qmm.ks_on ? "true" : "false", g_qmm.ks_g == 4 ? "4" : g_qmm.ks_g == 8 ? "8" : "rule: 8 if M<=1024 else 4",
++        g_qmm.ks_il == 0 ? "0" : g_qmm.ks_il == 1 ? "1" : "rule: 1", g_qmm.ks_on && g_qmm.q6_on ? "true" : "false",
++        (unsigned long long) atomic_load(&g_qmm.ks_dispatches));
+     return buf;
+ }
+--- a/src/ggml-metal/kernels/qmm.metal
++++ b/src/ggml-metal/kernels/qmm.metal
+@@ -16,6 +16,11 @@
+ // (sllm/bench/phase2-qmm/dev/probe.metal): the SN x KC tile is split into 16x16 sub-tiles, n-sub-tile fastest; in each,
+ // a lane holds rows nb..nb+3 at columns kb and kb+8. ggml-metal-qmm.m runs a self-test against a CPU reference at
+ // device init and disables this path if the result does not match.
++//
++// SLLM patch 10 (phase2-qmm32, phase2-qmm32b): kernel_sllm_qmm_ks (Q4_0 / Q4_1, every qmm row count) with
++// split-K inside the threadgroup instead of over the grid (no partial sums in device memory, no reduce kernel), and
++// kernel_sllm_qmm_q6p for Q6_K (K permuted inside each 32-K chunk so a lane loads whole words). Both have 16- and
++// 32-token tiles that give bitwise the same per-row results, so a row's result never depends on the row count.
+ 
+ #include "common.h"
+ 
+@@ -32,7 +37,7 @@
+     int32_t ldx;
+     int32_t ldd;
+     int32_t ksplit;
+-    int32_t pad;
++    int32_t flags;  // kernel_sllm_qmm_ks: bit 0 = interleaved K slices
+ } ggml_metal_kargs_sllm_qmm;
+ 
+ #define SLLM_QMM_TM  64
+@@ -213,6 +218,304 @@
+ SLLM_QMM_INST(q4_0, 16) SLLM_QMM_INST(q4_0, 32)
+ SLLM_QMM_INST(q4_1, 16) SLLM_QMM_INST(q4_1, 32)
+ SLLM_QMM_INST(q6_K, 16) SLLM_QMM_INST(q6_K, 32)
++
++// kernel_sllm_qmm_ks raw loads (weights as the left operand): d (+ m) and the 4 bytes qs[k0..k0+3] of one block
++// (2-byte aligned in Q4_0: two ushorts)
++struct sllm_raw_ks_q4_0 { half d; ushort q0, q1; };
++struct sllm_raw_ks_q4_1 { half d, m; ushort q0, q1; };
++template <typename BQ> struct sllm_raw_ks_of { typedef sllm_raw_ks_q4_0 type; };
++template <> struct sllm_raw_ks_of<sllm_block_q4_1> { typedef sllm_raw_ks_q4_1 type; };
++static inline void sllm_ld_ks(device const sllm_block_q4_0 * row, int kk, int k0, thread sllm_raw_ks_q4_0 & r) {
++    device const sllm_block_q4_0 & b = row[kk / 32];
++    device const ushort * q = (device const ushort *) (b.qs + k0);
++    r.d = b.d; r.q0 = q[0]; r.q1 = q[1];
++}
++static inline void sllm_ld_ks(device const sllm_block_q4_1 * row, int kk, int k0, thread sllm_raw_ks_q4_1 & r) {
++    device const sllm_block_q4_1 & b = row[kk / 32];
++    device const ushort * q = (device const ushort *) (b.qs + k0);
++    r.d = b.d; r.m = b.m; r.q0 = q[0]; r.q1 = q[1];
++}
++// lo = the weights k0 + 0..3, hi = k0 + 16..19
++static inline void sllm_cv_ks(thread const sllm_raw_ks_q4_0 & r, thread half4 & lo, thread half4 & hi) {
++    const uint q = (uint) r.q0 | ((uint) r.q1 << 16);
++    const uint4 b = uint4(q, q >> 8, q >> 16, q >> 24) & 0xFF;
++    lo = (half4(b & 0xF) - 8.h) * r.d;
++    hi = (half4(b >> 4) - 8.h) * r.d;
++}
++static inline void sllm_cv_ks(thread const sllm_raw_ks_q4_1 & r, thread half4 & lo, thread half4 & hi) {
++    const uint q = (uint) r.q0 | ((uint) r.q1 << 16);
++    const uint4 b = uint4(q, q >> 8, q >> 16, q >> 24) & 0xFF;
++    lo = half4(b & 0xF) * r.d + r.m;
++    hi = half4(b >> 4) * r.d + r.m;
++}
++
++// SLLM patch 10 (phase2-qmm32): decode-width path with intra-threadgroup split-K.
++// One threadgroup = 32 weight rows x NT token rows (NT = 16 or 32, one token tile per grid x). Its G simdgroups take K slices:
++// a.flags bit 0 clear: slice s = the 32-chunks [s*nk/G, (s+1)*nk/G) (contiguous), set: chunks s, s+G, s+2G, ...
++// Each slice dequantizes its chunks into the LEFT input of matmul2d (phase2-qmm32b: 4-byte runs per row instead of
++// the right input's 2 bytes; bitwise the same result as the right-input form), next chunk prefetched, into its own
++// 32x32 partial; the partials are summed through threadgroup memory in a fixed order (G = 8: p_s + p_{s+4} first,
++// then the four sums in slice order) and every output is written once. The threadgroup's weights are one contiguous
++// region (32 whole rows), which is what lets this path drop the grid split-K partials of kernel_sllm_qmm.
++template <typename BQ, int G, int NT, int R>
++kernel void kernel_sllm_qmm_ks(
++        constant ggml_metal_kargs_sllm_qmm & a,
++        device const char  * W,
++        device const float * X,
++        device       float * D,
++        uint3  tg   [[threadgroup_position_in_grid]],
++        ushort tid  [[thread_index_in_threadgroup]],
++        ushort sg   [[simdgroup_index_in_threadgroup]]) {
++    static_assert(G == 4 || G == 8, "G is 4 or 8");
++    static_assert(NT == 16 || NT == 32, "NT is 16 or 32");
++    static_assert(R == 1 || R == 2, "R is 1 or 2");
++    // R row tiles of 32 rows per threadgroup (phase2-qmm32b, prefill row counts): simdgroup sg = (row tile rt, K slice
++    // ks); the R simdgroups of a slice read the same activation chunk at about the same time, so the activations come
++    // from L1 once per R row tiles. Each simdgroup's arithmetic is the R = 1 one.
++    constexpr int SN = 32, NTH = 32 * G * R;
++    const int rt = (int) sg / G, ks = (int) sg % G;
++    const int n0 = tg.x * NT;
++    const int r0 = (tg.y * R + rt) * SN;
++    const int nk = a.K / 32;
++    const bool il = (a.flags & 1) != 0;
++    const int kb  = il ? 32 * ks : 32 * ((ks * nk) / G);
++    const int ke  = il ? a.K : 32 * (((ks + 1) * nk) / G);
++    const int kst = il ? 32 * G : 32;
++    const int nrem = clamp(a.N - n0, 0, NT);
++
++    // the weights are the LEFT operand (32 rows x 32 K), the activations the right one (transposed: X is [n][k])
++    constexpr auto desc = matmul2d_descriptor(SN, NT, 32, false, true, true,
++                                              matmul2d_descriptor::mode::multiply_accumulate);
++    matmul2d<desc, execution_simdgroup> mm;
++
++    device const float * xb = X + (uint64_t) n0 * a.ldx;
++    auto tX0 = tensor((device float *) xb, dextents<int32_t, 2>(32, NT), array<int, 2>({1, a.ldx}));
++    auto wL = mm.template get_left_input_cooperative_tensor<half, float, float>();
++    auto cT = mm.template get_destination_cooperative_tensor<decltype(wL), decltype(tX0), float>();
++    #pragma unroll
++    for (uint16_t i = 0; i < cT.get_capacity(); ++i) {
++        if (cT.is_valid_element(i)) cT[i] = 0.0f;
++    }
++
++    // Left-input layout (probed on the M5, checked by the self-test): element i = 16a + 8b + 4c + e holds
++    // (k = k0 + 16b + e, row = r0 + 8c + 16a), (k0, r0) = the index of element 0, k0 in {0, 4, 8, 12}. So for each of
++    // its four rows a lane needs k0..k0+3 and k0+16..k0+19 of a 32-K block: the low and high nibbles of the four
++    // consecutive bytes qs[k0..k0+3]. One row costs d (+ m) and one 4-byte run per block.
++    const auto ix0 = wL.get_multidimensional_index((uint16_t) 0);
++    const int k0l = ix0[0], rl = ix0[1];
++
++    typedef typename sllm_raw_ks_of<BQ>::type RAW;
++    RAW raw[4];
++    device const BQ * rps[4];
++    #pragma unroll
++    for (int q = 0; q < 4; ++q) {   // q = 2a + c -> row rl + 8c + 16a
++        const int gr = min(r0 + rl + 8*(q % 2) + 16*(q / 2), a.M - 1);
++        rps[q] = (device const BQ *) (W + (uint64_t) gr * a.nb01);
++    }
++    if (kb < ke) {
++        #pragma unroll
++        for (int q = 0; q < 4; ++q) sllm_ld_ks(rps[q], kb, k0l, raw[q]);
++    }
++    for (int k0 = kb; k0 < ke; k0 += kst) {
++        #pragma unroll
++        for (int q = 0; q < 4; ++q) {
++            half4 lo, hi;
++            sllm_cv_ks(raw[q], lo, hi);
++            const int a_ = q / 2, c_ = q % 2;
++            #pragma unroll
++            for (int e = 0; e < 4; ++e) {
++                wL[16*a_ + 0 + 4*c_ + e] = lo[e];
++                wL[16*a_ + 8 + 4*c_ + e] = hi[e];
++            }
++        }
++        if (k0 + kst < ke) {   // next chunk's loads are in flight during this chunk's matmul
++            #pragma unroll
++            for (int q = 0; q < 4; ++q) sllm_ld_ks(rps[q], k0 + kst, k0l, raw[q]);
++        }
++        if (nrem > 0) {
++            auto tX = tensor((device float *) xb + k0, dextents<int32_t, 2>(32, nrem), array<int, 2>({1, a.ldx}));
++            mm.run(wL, tX, cT);
++        }
++    }
++
++    // sum the G partials of each row tile in turn: red[q][n*32 + m], q = 0..3
++    threadgroup float red[4 * 1024];
++    for (int t = 0; t < R; ++t) {
++        if (t > 0) {
++            threadgroup_barrier(mem_flags::mem_threadgroup);
++        }
++        if (G == 8) {
++            if (rt == t && ks >= 4) {
++                threadgroup float * p = red + (ks - 4) * 1024;
++                #pragma unroll
++                for (uint16_t i = 0; i < cT.get_capacity(); ++i) {
++                    if (cT.is_valid_element(i)) { const auto ix = cT.get_multidimensional_index(i); p[ix[0] * 32 + ix[1]] = cT[i]; }
++                }
++            }
++            threadgroup_barrier(mem_flags::mem_threadgroup);
++            if (rt == t && ks < 4) {
++                threadgroup const float * p = red + ks * 1024;
++                #pragma unroll
++                for (uint16_t i = 0; i < cT.get_capacity(); ++i) {
++                    if (cT.is_valid_element(i)) { const auto ix = cT.get_multidimensional_index(i); cT[i] += p[ix[0] * 32 + ix[1]]; }
++                }
++            }
++            threadgroup_barrier(mem_flags::mem_threadgroup);
++        }
++        if (rt == t && ks < 4) {
++            threadgroup float * p = red + ks * 1024;
++            #pragma unroll
++            for (uint16_t i = 0; i < cT.get_capacity(); ++i) {
++                if (cT.is_valid_element(i)) { const auto ix = cT.get_multidimensional_index(i); p[ix[0] * 32 + ix[1]] = cT[i]; }
++            }
++        }
++        threadgroup_barrier(mem_flags::mem_threadgroup);
++        const int rb = (tg.y * R + t) * SN;
++        for (int e = tid; e < 1024; e += NTH) {
++            const int n = e / 32, m = e % 32;
++            const float s = ((red[e] + red[1024 + e]) + red[2048 + e]) + red[3072 + e];
++            if (n < nrem && rb + m < a.M) {
++                D[(uint64_t) (n0 + n) * a.ldd + rb + m] = s;
++            }
++        }
++    }
++}
++
++#define SLLM_QMM_KS_INST1(BQ, G, NT, R) \
++    template [[host_name("kernel_sllm_qmm_ks_" #BQ "_g" #G "_nt" #NT "_r" #R)]] kernel void kernel_sllm_qmm_ks<sllm_block_##BQ, G, NT, R>( \
++        constant ggml_metal_kargs_sllm_qmm &, device const char *, device const float *, device float *, uint3, ushort, ushort);
++
++#define SLLM_QMM_KS_INST(BQ, G) SLLM_QMM_KS_INST1(BQ, G, 16, 1) SLLM_QMM_KS_INST1(BQ, G, 32, 1) SLLM_QMM_KS_INST1(BQ, G, 32, 2)
++
++SLLM_QMM_KS_INST(q4_0, 4) SLLM_QMM_KS_INST(q4_0, 8)
++SLLM_QMM_KS_INST(q4_1, 4) SLLM_QMM_KS_INST(q4_1, 8)
++
++// SLLM patch 10 (phase2-qmm32): Q6_K (the LM heads). Inside every 32-K chunk the K order is
++// permuted so that a lane's four weights of a row are four consecutive bytes of ql and of qh: tile column c = 8e + t
++// (e = 0..3, t = 0..7) holds k = 4t + e. One uint load each (two ushorts on odd blocks, whose ql/qh are only 2-byte
++// aligned) instead of eight byte loads. The activations follow the same permutation: the threadgroup converts each
++// 32 x 32 chunk to half into threadgroup memory (double-buffered, one barrier per chunk), so matmul2d reads them from
++// there. Threadgroup = 4 simdgroups x 32 weight rows, one NT-token tile (16 or 32).
++struct sllm_raw_q6p { uint l, h; ushort sc; half d; };
++
++static inline void sllm_ld_q6p(device const sllm_block_q6_K * row, int kk, int t, thread sllm_raw_q6p & r) {
++    const int b = kk / 256, l0 = kk % 256, hh = l0 / 128, g = (l0 % 128) / 32;
++    device const sllm_block_q6_K & bl = row[b];
++    device const uchar * ql = bl.ql + 64*hh + 32*(g & 1) + 4*t;
++    device const uchar * qh = bl.qh + 32*hh + 4*t;
++    if ((b & 1) == 0) {
++        r.l = *((device const uint *) ql);
++        r.h = *((device const uint *) qh);
++    } else {
++        r.l = (uint) *((device const ushort *) ql) | ((uint) *((device const ushort *) (ql + 2)) << 16);
++        r.h = (uint) *((device const ushort *) qh) | ((uint) *((device const ushort *) (qh + 2)) << 16);
++    }
++    r.sc = *((device const ushort *) (bl.scales + 8*hh + 2*g));
++    r.d  = bl.d;
++}
++
++// the four weights k = kk + 4t + {0, 1, 2, 3} (all in the same 16-group, so one scale: 2g + (t >= 4))
++static inline void sllm_cv_q6p(thread const sllm_raw_q6p & r, int kk, int t, thread half4 & w) {
++    const int g = (kk % 128) / 32;
++    const uint shl = (g >= 2) ? 4 : 0, shh = 2*g;
++    const uint4 lb = uint4(r.l, r.l >> 8, r.l >> 16, r.l >> 24) & 0xFF;
++    const uint4 hb = uint4(r.h, r.h >> 8, r.h >> 16, r.h >> 24) & 0xFF;
++    const uint4 q = ((lb >> shl) & 0xF) | (((hb >> shh) & 3) << 4);
++    const float d = r.d;
++    const half sc = (half) (d * (float) (char) ((t >= 4) ? (r.sc >> 8) : (r.sc & 0xFF)));
++    w = half4(short4(q) - 32) * sc;
++}
++
++template <int NT>
++kernel void kernel_sllm_qmm_q6p(
++        constant ggml_metal_kargs_sllm_qmm & a,
++        device const char  * W,
++        device const float * X,
++        device       float * D,
++        uint3  tg   [[threadgroup_position_in_grid]],
++        ushort tid  [[thread_index_in_threadgroup]],
++        ushort sg   [[simdgroup_index_in_threadgroup]]) {
++    static_assert(NT == 16 || NT == 32, "NT is 16 or 32");
++    constexpr int G = 4, SN = 32, NTH = 32 * G;
++    constexpr int XPT = NT * 8 / NTH;   // float4 of the activation chunk per thread
++    const int n0 = tg.x * NT;
++    const int r0 = tg.y * (SN * G) + sg * SN;
++    const int nrem = clamp(a.N - n0, 0, NT);
++
++    constexpr auto desc = matmul2d_descriptor(NT, SN, 32, false, false, true,
++                                              matmul2d_descriptor::mode::multiply_accumulate);
++    matmul2d<desc, execution_simdgroup> mm;
++    threadgroup half xs[2 * NT * 32];
++    auto tX0 = tensor<threadgroup half, dextents<int32_t, 2>, tensor_inline>(xs, dextents<int32_t, 2>(32, NT));
++    auto wR = mm.template get_right_input_cooperative_tensor<half, half, float>();
++    auto cT = mm.template get_destination_cooperative_tensor<decltype(tX0), decltype(wR), float>();
++    #pragma unroll
++    for (uint16_t i = 0; i < cT.get_capacity(); ++i) {
++        if (cT.is_valid_element(i)) cT[i] = 0.0f;
++    }
++    // same register layout as kernel_sllm_qmm; tile column kbl + 8e holds physical k = 4 kbl + e
++    const auto ix0 = wR.get_multidimensional_index((uint16_t) 0);
++    const int nb = ix0[0], kbl = ix0[1];
++
++    device const sllm_block_q6_K * rps[8];
++    #pragma unroll
++    for (int nsub = 0; nsub < 2; ++nsub) {
++        #pragma unroll
++        for (int j = 0; j < 4; ++j) {
++            const int gr = min(r0 + nb + 16*nsub + j, a.M - 1);
++            rps[4*nsub + j] = (device const sllm_block_q6_K *) (W + (uint64_t) gr * a.nb01);
++        }
++    }
++
++    // activation chunk: NT token rows x 8 float4, XPT per thread; f -> (row f / 8, k 4 (f % 8) .. + 3)
++    float4 xr[XPT];
++    #define SLLM_Q6P_LOAD_X(kk) _Pragma("unroll") for (int i = 0; i < XPT; ++i) { const int f = tid + i * NTH; \
++        const int n = min(n0 + f / 8, a.N - 1); xr[i] = *((device const float4 *) (X + (uint64_t) n * a.ldx + (kk)) + f % 8); }
++    #define SLLM_Q6P_STORE_X(buf) _Pragma("unroll") for (int i = 0; i < XPT; ++i) { const int f = tid + i * NTH; \
++        threadgroup half * p = xs + (buf) * NT * 32 + (f / 8) * 32 + (f % 8); \
++        const float4 xc = clamp(xr[i], -65504.0f, 65504.0f); /* saturate instead of inf beyond half's range */ \
++        p[0] = (half) xc.x; p[8] = (half) xc.y; p[16] = (half) xc.z; p[24] = (half) xc.w; }
++
++    SLLM_Q6P_LOAD_X(0)
++    SLLM_Q6P_STORE_X(0)
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++    int buf = 0;
++    for (int k0 = 0; k0 < a.K; k0 += 32) {
++        const bool more = k0 + 32 < a.K;
++        if (more) { SLLM_Q6P_LOAD_X(k0 + 32) }
++        #pragma unroll
++        for (int nsub = 0; nsub < 2; ++nsub) {
++            #pragma unroll
++            for (int j = 0; j < 4; ++j) {
++                sllm_raw_q6p r;
++                sllm_ld_q6p(rps[4*nsub + j], k0, kbl, r);
++                half4 w4;
++                sllm_cv_q6p(r, k0, kbl, w4);
++                wR[8*(nsub + 0) + 0 + j] = w4[0];
++                wR[8*(nsub + 0) + 4 + j] = w4[1];
++                wR[8*(nsub + 2) + 0 + j] = w4[2];
++                wR[8*(nsub + 2) + 4 + j] = w4[3];
++            }
++        }
++        auto tX = tensor<threadgroup half, dextents<int32_t, 2>, tensor_inline>(xs + buf * NT * 32, dextents<int32_t, 2>(32, NT));
++        mm.run(tX, wR, cT);
++        if (more) { SLLM_Q6P_STORE_X(buf ^ 1) }
++        threadgroup_barrier(mem_flags::mem_threadgroup);
++        buf ^= 1;
++    }
++    #undef SLLM_Q6P_LOAD_X
++    #undef SLLM_Q6P_STORE_X
++
++    if (r0 >= a.M || nrem <= 0) return;
++    const int mrem = min(SN, a.M - r0);
++    auto tD = tensor(D + (uint64_t) n0 * a.ldd + r0, dextents<int32_t, 2>(mrem, nrem), array<int, 2>({1, a.ldd}));
++    cT.store(tD);
++}
++
++template [[host_name("kernel_sllm_qmm_q6p_nt16")]] kernel void kernel_sllm_qmm_q6p<16>(
++    constant ggml_metal_kargs_sllm_qmm &, device const char *, device const float *, device float *, uint3, ushort, ushort);
++template [[host_name("kernel_sllm_qmm_q6p_nt32")]] kernel void kernel_sllm_qmm_q6p<32>(
++    constant ggml_metal_kargs_sllm_qmm &, device const char *, device const float *, device float *, uint3, ushort, ushort);
+ 
+ #endif // GGML_METAL_HAS_TENSOR
+ 

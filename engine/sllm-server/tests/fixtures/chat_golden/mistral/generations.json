@@ -1,0 +1,430 @@
+[
+ {
+  "name": "weather_call",
+  "messages": [
+   {
+    "role": "user",
+    "content": "What's the weather in Paris right now? Use the tool."
+   }
+  ],
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "search_docs",
+     "description": "Search the docs, e.g. for “café” — 日本語 ok",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "query": {
+        "type": "string",
+        "description": "free text"
+       },
+       "limit": {
+        "type": "integer"
+       },
+       "filters": {
+        "type": "object",
+        "properties": {
+         "zeta": {
+          "type": "number"
+         },
+         "alpha": {
+          "type": "array",
+          "items": {
+           "type": "string",
+           "enum": [
+            "b",
+            "a",
+            "c"
+           ]
+          }
+         },
+         "mid": {
+          "type": "object",
+          "properties": {
+           "b": {
+            "type": "boolean"
+           },
+           "a": {
+            "type": "string"
+           }
+          }
+         }
+        }
+       }
+      },
+      "required": [
+       "query"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "get_weather",
+     "description": "Weather for a city",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "unit": {
+        "type": "string",
+        "enum": [
+         "celsius",
+         "fahrenheit"
+        ]
+       },
+       "city": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "city"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "ping",
+     "description": "No arguments",
+     "parameters": {
+      "type": "object",
+      "properties": {}
+     }
+    }
+   }
+  ],
+  "status": 200,
+  "raw": " According to the current data, the weather in Paris, France, is mostly cloudy with a temperature of 13°C (55°F). The wind is blowing at 13 km/h, and the humidity is at 80%. There is a 10% chance of precipitation.\n\nPlease note that the weather can change rapidly, so it's always a good idea to check the most recent updates before planning outdoor activities.",
+  "finish_reason": "stop",
+  "message": {
+   "content": " According to the current data, the weather in Paris, France, is mostly cloudy with a temperature of 13°C (55°F). The wind is blowing at 13 km/h, and the humidity is at 80%. There is a 10% chance of precipitation.\n\nPlease note that the weather can change rapidly, so it's always a good idea to check the most recent updates before planning outdoor activities.",
+   "tool_calls": []
+  }
+ },
+ {
+  "name": "search_nested",
+  "messages": [
+   {
+    "role": "system",
+    "content": "You are a helpful assistant."
+   },
+   {
+    "role": "user",
+    "content": "Search the docs for café with limit 3, filters: alpha b and a, zeta 1.5. Use the tool."
+   }
+  ],
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "search_docs",
+     "description": "Search the docs, e.g. for “café” — 日本語 ok",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "query": {
+        "type": "string",
+        "description": "free text"
+       },
+       "limit": {
+        "type": "integer"
+       },
+       "filters": {
+        "type": "object",
+        "properties": {
+         "zeta": {
+          "type": "number"
+         },
+         "alpha": {
+          "type": "array",
+          "items": {
+           "type": "string",
+           "enum": [
+            "b",
+            "a",
+            "c"
+           ]
+          }
+         },
+         "mid": {
+          "type": "object",
+          "properties": {
+           "b": {
+            "type": "boolean"
+           },
+           "a": {
+            "type": "string"
+           }
+          }
+         }
+        }
+       }
+      },
+      "required": [
+       "query"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "get_weather",
+     "description": "Weather for a city",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "unit": {
+        "type": "string",
+        "enum": [
+         "celsius",
+         "fahrenheit"
+        ]
+       },
+       "city": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "city"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "ping",
+     "description": "No arguments",
+     "parameters": {
+      "type": "object",
+      "properties": {}
+     }
+    }
+   }
+  ],
+  "status": 200,
+  "raw": " To provide you with the most relevant results, I've used a hypothetical API (in this case, a search engine for documents) that allows filtering and sorting based on specific parameters. Here's a pseudo-code example of how you might structure a request using the provided filters:\n\n```python\ndef search_documents(api_url, params):\n    response = requests.get(api_url, params=params)\n    return response.json()\n\nparams = {\n    'q': 'café',\n    'filters[alpha]': ['b', 'a'],\n    'filters[zeta]': '1.5',\n    'limit': 3\n}\n\nresults = search_documents('https://api.example.com/search', params)\n```\n\nIn this example, the `search_documents` function makes a GET request to the specified API",
+  "finish_reason": "length",
+  "message": {
+   "content": " To provide you with the most relevant results, I've used a hypothetical API (in this case, a search engine for documents) that allows filtering and sorting based on specific parameters. Here's a pseudo-code example of how you might structure a request using the provided filters:\n\n```python\ndef search_documents(api_url, params):\n    response = requests.get(api_url, params=params)\n    return response.json()\n\nparams = {\n    'q': 'café',\n    'filters[alpha]': ['b', 'a'],\n    'filters[zeta]': '1.5',\n    'limit': 3\n}\n\nresults = search_documents('https://api.example.com/search', params)\n```\n\nIn this example, the `search_documents` function makes a GET request to the specified API",
+   "tool_calls": []
+  }
+ },
+ {
+  "name": "two_calls",
+  "messages": [
+   {
+    "role": "user",
+    "content": "In one go: ping, and the weather in Rome in celsius. Call both tools."
+   }
+  ],
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "search_docs",
+     "description": "Search the docs, e.g. for “café” — 日本語 ok",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "query": {
+        "type": "string",
+        "description": "free text"
+       },
+       "limit": {
+        "type": "integer"
+       },
+       "filters": {
+        "type": "object",
+        "properties": {
+         "zeta": {
+          "type": "number"
+         },
+         "alpha": {
+          "type": "array",
+          "items": {
+           "type": "string",
+           "enum": [
+            "b",
+            "a",
+            "c"
+           ]
+          }
+         },
+         "mid": {
+          "type": "object",
+          "properties": {
+           "b": {
+            "type": "boolean"
+           },
+           "a": {
+            "type": "string"
+           }
+          }
+         }
+        }
+       }
+      },
+      "required": [
+       "query"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "get_weather",
+     "description": "Weather for a city",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "unit": {
+        "type": "string",
+        "enum": [
+         "celsius",
+         "fahrenheit"
+        ]
+       },
+       "city": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "city"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "ping",
+     "description": "No arguments",
+     "parameters": {
+      "type": "object",
+      "properties": {}
+     }
+    }
+   }
+  ],
+  "status": 200,
+  "raw": " To get the current weather in Rome, you can use a weather API like OpenWeatherMap. Here's a Python script using the `requests` library:\n\n```python\nimport requests\n\ndef get_weather(city):\n    api_key = \"your_openweathermap_api_key\"\n    base_url = \"http://api.openweathermap.org/data/2.5/weather?\"\n    complete_url = f\"{base_url}appid={api_key}&q={city}\"\n    response = requests.get(complete_url)\n    data = response.json()\n\n    if data[\"cod\"] != \"404\":\n        main = data[\"main\"]\n        temp_kelvin = main[\"temp\"]\n        temp_celsius = round(temp_kelvin - 273.15, 2",
+  "finish_reason": "length",
+  "message": {
+   "content": " To get the current weather in Rome, you can use a weather API like OpenWeatherMap. Here's a Python script using the `requests` library:\n\n```python\nimport requests\n\ndef get_weather(city):\n    api_key = \"your_openweathermap_api_key\"\n    base_url = \"http://api.openweathermap.org/data/2.5/weather?\"\n    complete_url = f\"{base_url}appid={api_key}&q={city}\"\n    response = requests.get(complete_url)\n    data = response.json()\n\n    if data[\"cod\"] != \"404\":\n        main = data[\"main\"]\n        temp_kelvin = main[\"temp\"]\n        temp_celsius = round(temp_kelvin - 273.15, 2",
+   "tool_calls": []
+  }
+ },
+ {
+  "name": "plain_answer",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Say hello in one short sentence. Do not use any tool."
+   }
+  ],
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "search_docs",
+     "description": "Search the docs, e.g. for “café” — 日本語 ok",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "query": {
+        "type": "string",
+        "description": "free text"
+       },
+       "limit": {
+        "type": "integer"
+       },
+       "filters": {
+        "type": "object",
+        "properties": {
+         "zeta": {
+          "type": "number"
+         },
+         "alpha": {
+          "type": "array",
+          "items": {
+           "type": "string",
+           "enum": [
+            "b",
+            "a",
+            "c"
+           ]
+          }
+         },
+         "mid": {
+          "type": "object",
+          "properties": {
+           "b": {
+            "type": "boolean"
+           },
+           "a": {
+            "type": "string"
+           }
+          }
+         }
+        }
+       }
+      },
+      "required": [
+       "query"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "get_weather",
+     "description": "Weather for a city",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "unit": {
+        "type": "string",
+        "enum": [
+         "celsius",
+         "fahrenheit"
+        ]
+       },
+       "city": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "city"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "ping",
+     "description": "No arguments",
+     "parameters": {
+      "type": "object",
+      "properties": {}
+     }
+    }
+   }
+  ],
+  "status": 200,
+  "raw": " Hello there! How can I assist you today?",
+  "finish_reason": "stop",
+  "message": {
+   "content": " Hello there! How can I assist you today?",
+   "tool_calls": []
+  }
+ }
+]

@@ -1,0 +1,430 @@
+[
+ {
+  "name": "weather_call",
+  "messages": [
+   {
+    "role": "user",
+    "content": "What's the weather in Paris right now? Use the tool."
+   }
+  ],
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "search_docs",
+     "description": "Search the docs, e.g. for “café” — 日本語 ok",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "query": {
+        "type": "string",
+        "description": "free text"
+       },
+       "limit": {
+        "type": "integer"
+       },
+       "filters": {
+        "type": "object",
+        "properties": {
+         "zeta": {
+          "type": "number"
+         },
+         "alpha": {
+          "type": "array",
+          "items": {
+           "type": "string",
+           "enum": [
+            "b",
+            "a",
+            "c"
+           ]
+          }
+         },
+         "mid": {
+          "type": "object",
+          "properties": {
+           "b": {
+            "type": "boolean"
+           },
+           "a": {
+            "type": "string"
+           }
+          }
+         }
+        }
+       }
+      },
+      "required": [
+       "query"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "get_weather",
+     "description": "Weather for a city",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "unit": {
+        "type": "string",
+        "enum": [
+         "celsius",
+         "fahrenheit"
+        ]
+       },
+       "city": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "city"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "ping",
+     "description": "No arguments",
+     "parameters": {
+      "type": "object",
+      "properties": {}
+     }
+    }
+   }
+  ],
+  "status": 200,
+  "raw": "I'm sorry for the inconvenience, but as an AI, I don't have real-time capabilities to access current weather data or perform live weather checks. However, you can easily check the weather in Paris by using a weather forecasting website or app like the National Weather Service (weather.gov), AccuWeather, or The Weather Channel. Simply type \"Paris\" into the search bar and you'll find the current weather conditions.",
+  "finish_reason": "stop",
+  "message": {
+   "content": "\nI'm sorry for the inconvenience, but as an AI, I don't have real-time capabilities to access current weather data or perform live weather checks. However, you can easily check the weather in Paris by using a weather forecasting website or app like the National Weather Service (weather.gov), AccuWeather, or The Weather Channel. Simply type \"Paris\" into the search bar and you'll find the current weather conditions.",
+   "tool_calls": []
+  }
+ },
+ {
+  "name": "search_nested",
+  "messages": [
+   {
+    "role": "system",
+    "content": "You are a helpful assistant."
+   },
+   {
+    "role": "user",
+    "content": "Search the docs for café with limit 3, filters: alpha b and a, zeta 1.5. Use the tool."
+   }
+  ],
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "search_docs",
+     "description": "Search the docs, e.g. for “café” — 日本語 ok",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "query": {
+        "type": "string",
+        "description": "free text"
+       },
+       "limit": {
+        "type": "integer"
+       },
+       "filters": {
+        "type": "object",
+        "properties": {
+         "zeta": {
+          "type": "number"
+         },
+         "alpha": {
+          "type": "array",
+          "items": {
+           "type": "string",
+           "enum": [
+            "b",
+            "a",
+            "c"
+           ]
+          }
+         },
+         "mid": {
+          "type": "object",
+          "properties": {
+           "b": {
+            "type": "boolean"
+           },
+           "a": {
+            "type": "string"
+           }
+          }
+         }
+        }
+       }
+      },
+      "required": [
+       "query"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "get_weather",
+     "description": "Weather for a city",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "unit": {
+        "type": "string",
+        "enum": [
+         "celsius",
+         "fahrenheit"
+        ]
+       },
+       "city": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "city"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "ping",
+     "description": "No arguments",
+     "parameters": {
+      "type": "object",
+      "properties": {}
+     }
+    }
+   }
+  ],
+  "status": 200,
+  "raw": "I'm sorry for the confusion, but it seems like you're asking me to search through a set of documents or a specific tool called \"café\" with certain filters. However, I don't have access to external documents or specific tools beyond my programming knowledge and the information I've been trained on.\n\nIf you're referring to a specific document or a tool named \"café,\" I would need more context or clarification on what you're looking for. If you're asking me to search for a specific topic within a document, you can describe the topic, and I'll do my best to help.\n\nIf you're referring to a tool or software named \"café,\" I would need to know more about its purpose and how it works to assist you.\n\nIn any case, if you have any specific questions or topics you'd like me to help with, feel free to ask!",
+  "finish_reason": "stop",
+  "message": {
+   "content": "\nI'm sorry for the confusion, but it seems like you're asking me to search through a set of documents or a specific tool called \"café\" with certain filters. However, I don't have access to external documents or specific tools beyond my programming knowledge and the information I've been trained on.\n\nIf you're referring to a specific document or a tool named \"café,\" I would need more context or clarification on what you're looking for. If you're asking me to search for a specific topic within a document, you can describe the topic, and I'll do my best to help.\n\nIf you're referring to a tool or software named \"café,\" I would need to know more about its purpose and how it works to assist you.\n\nIn any case, if you have any specific questions or topics you'd like me to help with, feel free to ask!",
+   "tool_calls": []
+  }
+ },
+ {
+  "name": "two_calls",
+  "messages": [
+   {
+    "role": "user",
+    "content": "In one go: ping, and the weather in Rome in celsius. Call both tools."
+   }
+  ],
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "search_docs",
+     "description": "Search the docs, e.g. for “café” — 日本語 ok",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "query": {
+        "type": "string",
+        "description": "free text"
+       },
+       "limit": {
+        "type": "integer"
+       },
+       "filters": {
+        "type": "object",
+        "properties": {
+         "zeta": {
+          "type": "number"
+         },
+         "alpha": {
+          "type": "array",
+          "items": {
+           "type": "string",
+           "enum": [
+            "b",
+            "a",
+            "c"
+           ]
+          }
+         },
+         "mid": {
+          "type": "object",
+          "properties": {
+           "b": {
+            "type": "boolean"
+           },
+           "a": {
+            "type": "string"
+           }
+          }
+         }
+        }
+       }
+      },
+      "required": [
+       "query"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "get_weather",
+     "description": "Weather for a city",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "unit": {
+        "type": "string",
+        "enum": [
+         "celsius",
+         "fahrenheit"
+        ]
+       },
+       "city": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "city"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "ping",
+     "description": "No arguments",
+     "parameters": {
+      "type": "object",
+      "properties": {}
+     }
+    }
+   }
+  ],
+  "status": 200,
+  "raw": "I'm sorry for the confusion, but as an AI, I don't have real-time capabilities to access the internet or fetch live data from external sources such as weather services or ping tools. However, I can guide you on how to do it yourself.\n\nTo call a ping tool and check the weather in Rome in Celsius, you can follow these steps:\n\n1. **Ping Tool:**\n   - Open a terminal or command prompt on your computer.\n   - Type `ping www.google.com` and press Enter. This will send a request to Google's homepage and measure the time it takes to receive a response. The lower the latency, the better the connection.\n\n2. **Weather Tool:**\n   - Open a web browser.\n   - Go to a weather website like www.weather.com or www.accuweather.com.\n   - Enter \"Rome\" in the search bar and select the correct city from the dropdown.\n   - Click on the city name to view the weather forecast.\n   -",
+  "finish_reason": "length",
+  "message": {
+   "content": "\nI'm sorry for the confusion, but as an AI, I don't have real-time capabilities to access the internet or fetch live data from external sources such as weather services or ping tools. However, I can guide you on how to do it yourself.\n\nTo call a ping tool and check the weather in Rome in Celsius, you can follow these steps:\n\n1. **Ping Tool:**\n   - Open a terminal or command prompt on your computer.\n   - Type `ping www.google.com` and press Enter. This will send a request to Google's homepage and measure the time it takes to receive a response. The lower the latency, the better the connection.\n\n2. **Weather Tool:**\n   - Open a web browser.\n   - Go to a weather website like www.weather.com or www.accuweather.com.\n   - Enter \"Rome\" in the search bar and select the correct city from the dropdown.\n   - Click on the city name to view the weather forecast.\n   -",
+   "tool_calls": []
+  }
+ },
+ {
+  "name": "plain_answer",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Say hello in one short sentence. Do not use any tool."
+   }
+  ],
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "search_docs",
+     "description": "Search the docs, e.g. for “café” — 日本語 ok",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "query": {
+        "type": "string",
+        "description": "free text"
+       },
+       "limit": {
+        "type": "integer"
+       },
+       "filters": {
+        "type": "object",
+        "properties": {
+         "zeta": {
+          "type": "number"
+         },
+         "alpha": {
+          "type": "array",
+          "items": {
+           "type": "string",
+           "enum": [
+            "b",
+            "a",
+            "c"
+           ]
+          }
+         },
+         "mid": {
+          "type": "object",
+          "properties": {
+           "b": {
+            "type": "boolean"
+           },
+           "a": {
+            "type": "string"
+           }
+          }
+         }
+        }
+       }
+      },
+      "required": [
+       "query"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "get_weather",
+     "description": "Weather for a city",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "unit": {
+        "type": "string",
+        "enum": [
+         "celsius",
+         "fahrenheit"
+        ]
+       },
+       "city": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "city"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "ping",
+     "description": "No arguments",
+     "parameters": {
+      "type": "object",
+      "properties": {}
+     }
+    }
+   }
+  ],
+  "status": 200,
+  "raw": "Hello!",
+  "finish_reason": "stop",
+  "message": {
+   "content": "\nHello!",
+   "tool_calls": []
+  }
+ }
+]

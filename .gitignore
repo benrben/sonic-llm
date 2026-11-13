@@ -1,0 +1,23 @@
+# Models and weights never enter the repo
+models/
+*.gguf
+*.safetensors
+# Benchmark output stays on disk
+results/
+# Build output
+target/
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+bench/build/
+
+# Vendored ggml dylibs (large binaries): fetched by engine/vendor/ggml-b11669/fetch.sh
+engine/vendor/ggml-b11669/lib/
+# SLLM's patched libggml-metal (D042): built by engine/vendor/sllm-metal-b11669/build.sh; lib/ and build/ stay local
+engine/vendor/sllm-metal-b11669/lib/
+engine/vendor/sllm-metal-b11669/build/
+# The row-exact libggml-metal (official b11669 + patches/0001-row-exact.patch): built by engine/vendor/ggml-rowexact-b11669/build.sh; lib/ and build/ stay local
+engine/vendor/ggml-rowexact-b11669/lib/
+engine/vendor/ggml-rowexact-b11669/build/
+engine/vendor/ggml-rowexact-b11669/download/

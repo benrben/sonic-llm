@@ -1,0 +1,30 @@
+[package]
+name = "sllm-core"
+version = "0.1.0"
+edition = "2021"
+description = "SLLM engine core, slimmed: GGUF header reader, ggml device registry and capability record over the b11669 ggml dylibs"
+publish = false
+# Exports DEP_SLLM_GGML_LIBDIR (the ggml dylib directory build.rs linked) to dependants such as sllm-server.
+links = "sllm_ggml"
+
+[lib]
+name = "sllm_core"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sllm-core"
+path = "src/bin/sllm-core.rs"
+
+[features]
+# Regenerate src/sys.rs from the vendored headers with bindgen (needs libclang).
+regen-bindings = ["dep:bindgen"]
+
+[dependencies]
+libc = "=0.2.191"
+memmap2 = "=0.9.12"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+
+[build-dependencies]
+cc = "=1.9.0"
+bindgen = { version = "=0.73.2", optional = true }

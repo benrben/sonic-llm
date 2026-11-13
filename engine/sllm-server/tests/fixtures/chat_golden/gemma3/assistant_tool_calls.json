@@ -1,0 +1,62 @@
+{
+ "family": "gemma3",
+ "gguf": "gemma-3-4b-it-qat-Q4_0.gguf",
+ "conversation": "assistant_tool_calls",
+ "messages": [
+  {
+   "role": "user",
+   "content": "Look up café docs."
+  },
+  {
+   "role": "assistant",
+   "content": null,
+   "tool_calls": [
+    {
+     "id": "call_1",
+     "type": "function",
+     "function": {
+      "name": "search_docs",
+      "arguments": "{\"query\": \"caf\\u00e9 \\u65e5\\u672c\", \"limit\": 3, \"filters\": {\"zeta\": 1.5, \"alpha\": [\"b\", \"a\"], \"mid\": {\"b\": true, \"a\": null}}}"
+     }
+    }
+   ]
+  },
+  {
+   "role": "user",
+   "content": "Thanks, continue."
+  }
+ ],
+ "tools": [],
+ "prompt": "<start_of_turn>user\nLook up café docs.<end_of_turn>\n<start_of_turn>model\n<end_of_turn>\n<start_of_turn>user\nThanks, continue.<end_of_turn>\n<start_of_turn>model\n",
+ "tokens": [
+  2,
+  105,
+  2364,
+  107,
+  13908,
+  872,
+  33443,
+  48949,
+  236761,
+  106,
+  107,
+  105,
+  4368,
+  107,
+  106,
+  107,
+  105,
+  2364,
+  107,
+  12879,
+  236764,
+  4102,
+  236761,
+  106,
+  107,
+  105,
+  4368,
+  107
+ ],
+ "server_prompt_tokens": 28
+}

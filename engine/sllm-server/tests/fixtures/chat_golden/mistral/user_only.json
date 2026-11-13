@@ -1,0 +1,23 @@
+{
+ "family": "mistral",
+ "gguf": "Mistral-7B-Instruct-v0.3-Q4_K_M.gguf",
+ "conversation": "user_only",
+ "messages": [
+  {
+   "role": "user",
+   "content": "Hello there"
+  }
+ ],
+ "tools": [],
+ "prompt": "[INST] Hello there [/INST]",
+ "tokens": [
+  1,
+  3,
+  29473,
+  23325,
+  1504,
+  29473,
+  4
+ ],
+ "server_prompt_tokens": 7
+}

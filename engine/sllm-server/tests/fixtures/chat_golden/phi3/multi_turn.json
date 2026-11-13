@@ -1,0 +1,101 @@
+{
+ "family": "phi3",
+ "gguf": "Phi-3.5-mini-instruct-Q4_0.gguf",
+ "conversation": "multi_turn",
+ "messages": [
+  {
+   "role": "system",
+   "content": "You are a terse assistant."
+  },
+  {
+   "role": "user",
+   "content": "Name a colour."
+  },
+  {
+   "role": "assistant",
+   "content": "Blue."
+  },
+  {
+   "role": "user",
+   "content": "Another."
+  },
+  {
+   "role": "assistant",
+   "content": "  Red.  \n"
+  },
+  {
+   "role": "user",
+   "content": "And one more please."
+  }
+ ],
+ "tools": [],
+ "prompt": "<|system|>\nYou are a terse assistant.<|end|>\n<|user|>\nName a colour.<|end|>\n<|assistant|>\nBlue.<|end|>\n<|user|>\nAnother.<|end|>\n<|assistant|>\n  Red.  \n<|end|>\n<|user|>\nAnd one more please.<|end|>\n<|assistant|>\n",
+ "tokens": [
+  32006,
+  29871,
+  13,
+  3492,
+  526,
+  263,
+  1935,
+  344,
+  20255,
+  29889,
+  32007,
+  29871,
+  13,
+  32010,
+  29871,
+  13,
+  1170,
+  263,
+  12384,
+  29889,
+  32007,
+  29871,
+  13,
+  32001,
+  29871,
+  13,
+  21319,
+  29889,
+  32007,
+  29871,
+  13,
+  32010,
+  29871,
+  13,
+  2744,
+  1228,
+  29889,
+  32007,
+  29871,
+  13,
+  32001,
+  29871,
+  13,
+  29871,
+  4367,
+  29889,
+  259,
+  13,
+  32007,
+  29871,
+  13,
+  32010,
+  29871,
+  13,
+  2855,
+  697,
+  901,
+  3113,
+  29889,
+  32007,
+  29871,
+  13,
+  32001,
+  29871,
+  13
+ ],
+ "server_prompt_tokens": 65
+}

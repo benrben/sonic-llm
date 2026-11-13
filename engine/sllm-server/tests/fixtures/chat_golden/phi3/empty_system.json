@@ -1,0 +1,36 @@
+{
+ "family": "phi3",
+ "gguf": "Phi-3.5-mini-instruct-Q4_0.gguf",
+ "conversation": "empty_system",
+ "messages": [
+  {
+   "role": "system",
+   "content": ""
+  },
+  {
+   "role": "user",
+   "content": "What is 2+2?"
+  }
+ ],
+ "tools": [],
+ "prompt": "<|user|>\nWhat is 2+2?<|end|>\n<|assistant|>\n",
+ "tokens": [
+  32010,
+  29871,
+  13,
+  5618,
+  338,
+  29871,
+  29906,
+  29974,
+  29906,
+  29973,
+  32007,
+  29871,
+  13,
+  32001,
+  29871,
+  13
+ ],
+ "server_prompt_tokens": 16
+}

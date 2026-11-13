@@ -1,0 +1,50 @@
+{
+ "family": "qwen35",
+ "gguf": "Qwen3.5-4B-Q4_0.gguf",
+ "conversation": "system_user",
+ "messages": [
+  {
+   "role": "system",
+   "content": "You are a terse assistant."
+  },
+  {
+   "role": "user",
+   "content": "What is 2+2?"
+  }
+ ],
+ "tools": [],
+ "prompt": "<|im_start|>system\nYou are a terse assistant.<|im_end|>\n<|im_start|>user\nWhat is 2+2?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+ "tokens": [
+  248045,
+  8678,
+  198,
+  2523,
+  513,
+  264,
+  48834,
+  17313,
+  13,
+  248046,
+  198,
+  248045,
+  846,
+  198,
+  3710,
+  369,
+  220,
+  17,
+  10,
+  17,
+  30,
+  248046,
+  198,
+  248045,
+  74455,
+  198,
+  248068,
+  271,
+  248069,
+  271
+ ],
+ "server_prompt_tokens": 30
+}
