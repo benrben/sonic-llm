@@ -1,12 +1,12 @@
-/* The live page (charts.js, liveview.js, live.js) loaded in the harness: a fake server answers /api/live/state from
+/* The live page (its scripts, in the order of live.html) loaded in the harness: a fake server answers /api/live/state from
    `page.server`, the event stream is a fake SharedWorker port the test feeds with emit(). */
 'use strict';
 const { makeContext, load, response, settle } = require('./harness');
 
 const SCENARIOS = [
   { id: 'chat', name: 'Chat', group: 'Talk', what: 'talk' },
-  { id: 'swarm', name: 'Swarm', group: 'Documents', what: 'one agent per file', agents: 8 },
-  { id: 'relay', name: 'Relay', group: 'Agents', what: 'laps of fresh agents', agents: 2 }
+  { id: 'swarm', name: 'Swarm', group: 'Many agents', what: 'one agent per document', agents: 8 },
+  { id: 'relay', name: 'Relay', group: 'Many agents', what: 'laps of fresh agents', agents: 2 }
 ];
 
 function session(extra) {
@@ -31,17 +31,17 @@ async function openPage(opts) {
     this.port = { onmessage: null, start() {}, postMessage: (m) => page.posted.push(m) };
     page.port = this.port;
   };
-  load(ctx, ['charts.js', 'liveview.js']);
+  load(ctx, ['charts.js', 'state.js', 'numbers.js', 'liveview.js', 'testsview.js']);
   ctx.Charts.line = () => ({ update() {} });  // the SVG charts need a real layout
-  load(ctx, ['live.js']);
+  load(ctx, ['app.js', 'topbar.js', 'tests.js', 'files.js', 'result.js', 'history.js', 'live.js']);
   await settle();
   Object.assign(page, box, {
     $: (id) => box.ctx.document.getElementById(id),
     emit: async (ev) => { page.port.onmessage({ data: { data: JSON.stringify(ev) } }); await settle(); },
     up: async () => { page.port.onmessage({ data: { up: true } }); await settle(); },
     stateCalls: () => box.calls.filter((c) => c.key === 'GET /api/live/state').length,
-    // the message boxes of runs (not the user's own lines)
-    runBoxes: () => page.$('messages').children.filter((c) => c.className === 'msg bot' && c.html.indexOf('class="scen"') >= 0),
+    // the answer boxes of runs
+    runBoxes: () => page.$('messages').children.filter((c) => c.className === 'runbox'),
     answer: (b, rt) => b.querySelector('.answer[data-rt="' + (rt || 'sllm') + '"]'),
     rows: (b, rt) => page.answer(b, rt).querySelector('.agentlist').children
   });

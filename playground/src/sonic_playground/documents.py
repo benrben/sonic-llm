@@ -72,3 +72,13 @@ def save_upload(name: str, data: bytes) -> str:
     folder.mkdir(parents=True, exist_ok=True)
     (folder / base).write_bytes(data)
     return f"uploads/{base}"
+
+
+def delete_upload(name: str) -> str:
+    """Remove a document the user added (not a sample). Returns its path; raises DocumentError when there is no such upload."""
+    folder = settings.get().documents_dir
+    target = (folder / Path(name).name).resolve()
+    if Path(name).name != name or folder.resolve() not in target.parents or not target.is_file():
+        raise DocumentError(f"no uploaded document {name!r}")
+    target.unlink()
+    return f"uploads/{target.name}"

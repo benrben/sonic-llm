@@ -6,7 +6,7 @@ const { makeContext, load } = require('./harness');
 
 function liveView() {
   const { ctx } = makeContext({});
-  load(ctx, ['charts.js', 'liveview.js']);
+  load(ctx, ['charts.js', 'state.js']);
   return ctx.LiveView;
 }
 const V = liveView();

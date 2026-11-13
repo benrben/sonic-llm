@@ -18,7 +18,7 @@ test('a missed run_done: the next refresh clears Stopping and lets the person se
   assert.equal(p.$('send').textContent, 'Stopping…');
   p.server.session = session({ busy: false });  // the run ended; its run_done never came
   await p.up();
-  assert.equal(p.$('send').textContent, 'Send');
+  assert.equal(p.$('send').textContent, 'Run');
   assert.equal(p.$('send').disabled, false);
 });
 
@@ -44,20 +44,21 @@ test('run_done with an error moves every row and the answer out of reading and w
   p.rows(b).forEach((r) => assert.ok(LIVE.indexOf(r.dataset.state) < 0, 'row still ' + r.dataset.state));
   assert.notEqual(p.answer(b).querySelector('.state').textContent, 'reading 3 files');
   assert.equal(p.answer(b).querySelector('.text').classList.contains('cursor'), false);
-  assert.ok(p.$('messages').children.some((c) => c.html.indexOf('boom') >= 0));
+  assert.ok(p.$('notice').innerHTML.indexOf('boom') >= 0);
+  assert.match(p.$('runState').innerHTML, /Failed/);
 });
 
 test('a page opened mid-run shows the run and keeps its events', async () => {
   const p = await openPage({ session: session({ busy: true }) });
   const boxes = p.runBoxes();
   assert.equal(boxes.length, 1);
-  assert.ok(boxes[0].html.indexOf('started elsewhere') >= 0);
+  assert.match(p.$('runTitle').textContent, /started elsewhere/);
   await p.emit({ type: 'token', run: 'r9', rt: 'sllm', text: 'hello' });
   assert.equal(p.answer(p.runBoxes()[0]).querySelector('.text').textContent, 'hello');
   assert.equal(p.$('send').textContent, 'Stop');
   await p.emit({ type: 'run_done', run: 'r9', record: null });
   assert.equal(p.runBoxes().length, 1);
-  assert.equal(p.$('send').textContent, 'Send');
+  assert.equal(p.$('send').textContent, 'Run');
 });
 
 test('a run started elsewhere while the page is open gets a box when the server says busy', async () => {
@@ -67,7 +68,7 @@ test('a run started elsewhere while the page is open gets a box when the server 
   assert.equal(p.runBoxes().length, 1);
   await p.emit({ type: 'run_start', run: 'r2', scenario: 'chat', engines: ['sllm'] });  // its start comes late: one box, not two
   assert.equal(p.runBoxes().length, 1);
-  assert.ok(p.runBoxes()[0].html.indexOf('Chat') >= 0);
+  assert.equal(p.$('runTitle').textContent, 'Chat');
 });
 
 test('the snapshot event is applied like a refresh', async () => {
@@ -75,7 +76,7 @@ test('the snapshot event is applied like a refresh', async () => {
   await p.emit(START);
   assert.equal(p.$('send').textContent, 'Stop');
   await p.emit({ type: 'snapshot', state: { session: session({ busy: false }) } });
-  assert.equal(p.$('send').textContent, 'Send');
+  assert.equal(p.$('send').textContent, 'Run');
 });
 
 test('a resync event asks the server for its state', async () => {
@@ -90,19 +91,19 @@ test('an engine that is restarting shows so in the status chip', async () => {
   const s = session({ busy: true });
   s.engines.sllm.restarting = true;
   await p.emit({ type: 'session', session: s });
-  assert.match(p.$('status').textContent, /restarting/i);
+  assert.match(p.$('statusText').textContent, /restarting/i);
 });
 
 test('a session that says it is restarting shows so in the status chip', async () => {
   const p = await openPage();
   await p.emit({ type: 'session', session: session({ busy: true, restarting: true }) });
-  assert.match(p.$('status').textContent, /restarting/i);
+  assert.match(p.$('statusText').textContent, /restarting/i);
 });
 
 test('a load that failed in another tab is said in this one', async () => {
   const p = await openPage();
   await p.emit({ type: 'session', session: null, error: 'out of memory' });
-  assert.ok(p.$('messages').children.some((c) => c.html.indexOf('out of memory') >= 0));
+  assert.ok(p.$('notice').innerHTML.indexOf('out of memory') >= 0);
 });
 
 test('a /state answer older than a run start does not end that run', async () => {

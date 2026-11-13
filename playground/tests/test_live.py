@@ -187,7 +187,7 @@ def test_a_limit_past_the_context_does_not_cut_the_document_away():
 
 
 def test_every_scenario_is_in_a_group():
-    assert {x["group"] for x in SCENARIOS} == {"Talk", "Documents", "Agents", "Engine tests"}
+    assert {x["group"] for x in SCENARIOS} == {"Talk", "Many agents", "Documents", "Checks"}
 
 
 def test_fit_prompt_cuts_the_document_not_the_question():

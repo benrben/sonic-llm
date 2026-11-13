@@ -139,9 +139,9 @@ async def test_turns_block_holds_k_agents_and_llama_is_left_alone(monkeypatch, l
 
 def test_scenarios_list_has_the_turns_and_the_other_scenarios_are_unchanged():
     ids = [x["id"] for x in SCENARIOS]
-    assert ids == ["chat", "swarm", "shared", "load", "exact", "burst", "team", "followup", "relay", "long", "turns", "classify", "extract", "compress", "summarize"]
+    assert ids == ["chat", "long", "swarm", "team", "followup", "relay", "turns", "shared", "classify", "extract", "summarize", "compress", "load", "burst", "exact"]
     t = next(x for x in SCENARIOS if x["id"] == "turns")
-    assert (t["name"], t["icon"]) == ("Agents taking turns", "🔁") and "disk" in t["what"]
+    assert t["name"] == "Agents taking turns" and "disk" in t["what"] and "icon" not in t
 
 
 # -- task B: agents taking turns ------------------------------------------------------------------------------------
@@ -267,7 +267,7 @@ async def test_turns_agents_show_in_the_grid_as_reading_writing_parked_done(even
     for i in range(6):
         assert {(i, "waiting"), (i, "reading"), (i, "writing"), (i, "parked"), (i, "done")} <= states
     assert [x["state"] for x in ag if x["i"] == 0] == ["waiting", "reading", "writing", "parked", "reading", "writing", "parked", "reading", "writing", "done"]
-    assert any(x.get("type") == "token" and "same tokens after its SSD round trips" in x["text"] for x in events)
+    assert any(x.get("type") == "token" and "same words after being parked on disk" in x["text"] for x in events)
 
 
 async def test_turns_detect_a_changed_answer_after_the_ssd_round_trip(events, library):

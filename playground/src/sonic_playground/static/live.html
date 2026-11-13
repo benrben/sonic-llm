@@ -4,162 +4,232 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Sonic LLM playground</title>
-<link rel="icon" href="data:,">
-<link rel="stylesheet" href="/static/live.css">
+<meta name="description" content="Run live tests on your own models with Sonic LLM, side by side with llama.cpp if you have it.">
+<link rel="icon" href="/static/logo.svg" type="image/svg+xml">
+<script src="/static/theme.js"></script>
+<link rel="stylesheet" href="/static/tokens.css">
+<link rel="stylesheet" href="/static/layout.css">
+<link rel="stylesheet" href="/static/stage.css">
+<link rel="stylesheet" href="/static/dialogs.css">
 </head>
-<body class="live">
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <symbol id="i-chat" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></symbol>
+  <symbol id="i-doc" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/></symbol>
+  <symbol id="i-swarm" viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></symbol>
+  <symbol id="i-team" viewBox="0 0 24 24"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></symbol>
+  <symbol id="i-reply" viewBox="0 0 24 24"><path d="M9 14 4 9l5-5"/><path d="M20 20v-7a4 4 0 0 0-4-4H4"/></symbol>
+  <symbol id="i-relay" viewBox="0 0 24 24"><path d="m17 1 4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14M7 23l-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></symbol>
+  <symbol id="i-turns" viewBox="0 0 24 24"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></symbol>
+  <symbol id="i-layers" viewBox="0 0 24 24"><path d="m12 2-10 5 10 5 10-5z"/><path d="m2 17 10 5 10-5M2 12l10 5 10-5"/></symbol>
+  <symbol id="i-tag" viewBox="0 0 24 24"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><path d="M7 7h.01"/></symbol>
+  <symbol id="i-code" viewBox="0 0 24 24"><path d="m16 18 6-6-6-6M8 6l-6 6 6 6"/></symbol>
+  <symbol id="i-lines" viewBox="0 0 24 24"><path d="M17 10H3M21 6H3M21 14H3M17 18H3"/></symbol>
+  <symbol id="i-shrink" viewBox="0 0 24 24"><path d="M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7"/></symbol>
+  <symbol id="i-pulse" viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></symbol>
+  <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 2 3 14h9l-1 8 10-12h-9z"/></symbol>
+  <symbol id="i-target" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></symbol>
+  <symbol id="i-upload" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></symbol>
+  <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/></symbol>
+  <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0zM12 9v4M12 17h.01"/></symbol>
+  <symbol id="i-no" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="m15 9-6 6M9 9l6 6"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6M10 11v6M14 11v6M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M6 4v16l14-8z"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></symbol>
+  <symbol id="i-chip" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v4M15 1v4M9 19v4M15 19v4M1 9h4M1 15h4M19 9h4M19 15h4"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></symbol>
+</defs></svg>
+
+<a class="skip" href="#results">Skip to the results</a>
 <header class="top">
-  <a class="brand" href="/"><span class="logo">◆</span> Sonic LLM playground</a>
-  <div class="modelbar">
-    <select id="model" aria-label="Model"></select>
-    <button id="load" class="primary">Load</button>
-    <button id="modelsBtn" class="ghost" title="Download models, search Hugging Face, remove models">Get models</button>
-    <button id="stop" class="ghost" hidden title="Free the model's memory and the GPU">Unload</button>
-    <div class="popwrap">
-      <button id="optBtn" class="ghost" aria-expanded="false" aria-controls="optPanel">Options ▾</button>
-      <div class="pop down" id="optPanel" hidden>
-        <h3>Model options</h3>
-        <p class="small muted">These apply when you load a model.</p>
-        <label class="field">Memory limit per engine, GiB
-          <input type="number" id="limKv" min="1" step="0.5" placeholder="all that fits"></label>
-        <label class="check"><input type="checkbox" id="compare"> Compare with llama.cpp: run everything on both</label>
-        <p class="small muted" id="compareNote"></p>
-        <div id="limits" class="small loaded"></div>
+  <a class="brand" href="/" aria-label="Sonic LLM playground, home">
+    <svg viewBox="0 0 96 96" aria-hidden="true"><rect width="96" height="96" rx="22" fill="#2a78d6"/><g stroke="#fff" stroke-width="9" stroke-linecap="round" fill="none"><path d="M16 30H46M24 48H50M16 66H46"/><path d="M56 24 78 48 56 72" stroke-linejoin="round"/></g></svg>
+    <span>Sonic LLM<small>playground</small></span>
+  </a>
+  <div class="modelbar" role="group" aria-label="Model">
+    <label class="sr" for="model">Model</label>
+    <select id="model"></select>
+    <button id="load" class="btn primary" type="button">Load</button>
+    <button id="stop" class="btn" type="button" hidden title="Free the model's memory and the GPU">Unload</button>
+    <span id="status" class="pill" role="status" aria-live="polite"><span class="dot"></span><span id="statusText">No model loaded</span></span>
+  </div>
+  <div class="tools">
+    <div class="compare popwrap">
+      <label class="switch"><input type="checkbox" id="compare" role="switch"><span class="track"></span><span>Compare with llama.cpp</span></label>
+      <button id="compareWhy" class="btn icon quiet" type="button" hidden aria-expanded="false" aria-controls="comparePanel" aria-label="Why is the comparison off?" title="Why is the comparison off?"><svg class="ic" aria-hidden="true"><use href="#i-info"/></svg></button>
+      <div class="pop" id="comparePanel" hidden>
+        <h3>llama.cpp was not found</h3>
+        <p id="compareNote"></p>
       </div>
     </div>
-    <span id="status" class="chip">No model loaded</span>
-    <button id="exactChip" class="chip" hidden></button>
+    <button id="modelsBtn" class="btn" type="button"><svg class="ic s" aria-hidden="true"><use href="#i-download"/></svg>Get models</button>
+    <button id="historyBtn" class="btn icon" type="button" aria-label="Earlier runs" title="Earlier runs"><svg class="ic" aria-hidden="true"><use href="#i-clock"/></svg></button>
+    <div class="popwrap" id="optWrap">
+      <button id="optBtn" class="btn icon" type="button" aria-label="Engine details" title="Engine details" aria-expanded="false" aria-controls="optPanel"><svg class="ic" aria-hidden="true"><use href="#i-sliders"/></svg></button>
+      <div class="pop" id="optPanel" hidden>
+        <h3>Engine details</h3>
+        <label class="field">Memory for agents, GiB
+          <input type="number" id="limKv" min="1" step="0.5" placeholder="as much as fits">
+          <span class="hint">Applies the next time you load a model.</span></label>
+        <div id="limits" class="loaded small"></div>
+      </div>
+    </div>
+    <button id="theme" class="btn icon" type="button" aria-label="Switch to dark theme" title="Switch theme"><svg class="ic" aria-hidden="true"><use href="#i-moon"/></svg></button>
   </div>
 </header>
 
 <main class="split">
-  <!-- left: the work -->
-  <section class="chat">
-    <div class="banner" id="banner" role="status" hidden></div>
-    <div id="messages" class="messages" aria-live="polite">
-      <div class="welcome" id="welcome">
-        <h1>Pick a task, add files if it reads documents, and run it.</h1>
-        <ol>
-          <li><b>Model:</b> pick one at the top. Pressing Send loads it for you.</li>
-          <li><b>Task:</b> chat, document jobs, agents or engine tests, in the menu below.</li>
-          <li><b>Files:</b> tick the sample documents, or add your own.</li>
-        </ol>
-      </div>
-    </div>
-
-    <div class="suggest" id="suggest"></div>
-
-    <div class="composer">
-      <div class="ctrls">
-        <div class="popwrap">
-          <button id="taskBtn" class="task" aria-expanded="false" aria-controls="taskMenu"><span id="taskName">Chat</span> ▾</button>
-          <div class="pop up wide" id="taskMenu" role="menu" aria-label="Task" hidden></div>
+  <section class="picker" aria-labelledby="pickH">
+    <div class="picker-scroll">
+      <h2 id="pickH">Choose a test</h2>
+      <p class="lead">Every test runs live on this Mac. Pick one and press Run.</p>
+      <div id="tests"></div>
+      <div id="controlsPark" hidden><div id="controls" class="controls">
+        <div class="field" id="askBox" hidden>
+          <label for="input" id="askLabel">Your question</label>
+          <textarea id="input" rows="3"></textarea>
+          <div class="sugg-list" id="suggest"></div>
         </div>
-        <button id="attach" class="ghost" title="Pick files from the library">📎 <span id="nfiles">Files</span></button>
-        <div class="attached" id="attached"></div>
+        <div class="docs" id="docsBox" hidden>
+          <span class="label" id="docsLabel">Documents</span>
+          <div class="row"><button id="attach" class="btn" type="button"><svg class="ic s" aria-hidden="true"><use href="#i-doc"/></svg><span id="nfiles">Choose documents</span></button><div class="attached" id="attached"></div></div>
+        </div>
         <label class="agentsbox" id="agentsRow" hidden>Agents <input type="number" id="agents" min="1" max="256" step="1" value="256"></label>
-        <span class="grow"></span>
-        <div class="popwrap">
-          <button id="setBtn" class="ghost" aria-expanded="false" aria-controls="setPanel">Settings<span id="setNote"></span> ▾</button>
-          <div class="pop up right wide" id="setPanel" hidden>
-            <h3 id="thinkHead">Answer level</h3>
-            <div class="seg" id="think" role="radiogroup" aria-label="Thinking"></div>
-            <p class="small muted" id="thinkWhat"></p>
-            <h3>Limits <span class="muted small" id="limitsSet"></span></h3>
-            <div class="limgrid">
-              <label>Agents at once (more = less context each)<input type="number" id="limPar" min="1" max="256" placeholder="all at once"></label>
-              <label>Context per agent<input type="number" id="limCtx" min="512" step="512" placeholder="most that fits"></label>
-              <label>Chat / manager answer<input type="number" id="limAnswer" min="16" placeholder="until the model stops"></label>
-              <label>Agent answer<input type="number" id="limAgent" min="16" placeholder="until the model stops"></label>
-              <label>Characters read per document<input type="number" id="limDoc" min="200" placeholder="whole document"></label>
-              <button class="link" id="limClear">Clear limits</button>
-            </div>
-          </div>
+        <div id="levelBox" hidden>
+          <span class="label small" id="thinkHead">Answer level</span>
+          <div class="seg" id="think" role="radiogroup" aria-labelledby="thinkHead"></div>
+          <p class="hint" id="thinkWhat"></p>
         </div>
-        <button id="reset" class="link">New chat</button>
-      </div>
-      <div class="row">
-        <textarea id="input" rows="2" aria-label="Message"></textarea>
-        <button id="send" class="primary">Send</button>
-      </div>
-      <div class="plan small" id="plan"></div>
+        <details class="adv" id="adv">
+          <summary>Advanced limits <span class="muted" id="limitsSet"></span></summary>
+          <div class="limgrid">
+            <label class="field">Agents at once<input type="number" id="limPar" min="1" max="256" placeholder="all at once"></label>
+            <label class="field">Room per agent, tokens<input type="number" id="limCtx" min="512" step="512" placeholder="most that fits"></label>
+            <label class="field">Longest chat answer, tokens<input type="number" id="limAnswer" min="16" placeholder="until it stops"></label>
+            <label class="field">Longest agent answer, tokens<input type="number" id="limAgent" min="16" placeholder="until it stops"></label>
+            <label class="field">Characters read per document<input type="number" id="limDoc" min="200" placeholder="whole document"></label>
+            <div><button class="link" id="limClear" type="button">Clear limits</button></div>
+          </div>
+        </details>
+      </div></div>
+    </div>
+    <div class="dock">
+      <p class="plan" id="plan" aria-live="polite"></p>
+      <button id="send" class="btn primary big" type="button">Run</button>
     </div>
   </section>
 
-  <!-- right: the engine -->
-  <section class="viz viz-root" aria-label="Live metrics">
-    <div class="card vizempty" id="vizEmpty">Load a model to see its speed, GPU and memory live.</div>
-    <div class="tiles" id="tiles"></div>
-    <div class="card" id="swarmCard" hidden>
-      <div class="card-h"><h2>Agents</h2><span class="small muted" id="swarmNote"></span></div>
-      <div id="swarm"></div>
+  <section class="stage" id="results" tabindex="-1" aria-labelledby="stageH">
+    <h2 class="sr" id="stageH">Results</h2>
+    <div id="notice" role="alert"></div>
+    <div id="setup"></div>
+    <div id="intro"></div>
+    <div id="run" hidden>
+      <div class="rhead">
+        <div><h3 id="runTitle">Run</h3><p class="muted small" id="runSub"></p></div>
+        <div class="rstate"><span class="pill" id="runState" role="status" aria-live="polite"></span><span class="elapsed small" id="elapsed"></span></div>
+      </div>
+      <blockquote class="ask" id="runAsk" hidden></blockquote>
+      <p class="verdict-line" id="runVerdict" hidden></p>
+      <p class="key small" id="tileKey" hidden><span><i class="swatch"></i>Sonic LLM</span><span><i class="swatch llama"></i>llama.cpp</span><span class="muted">Ratios say how much faster Sonic LLM is.</span></p>
+      <div class="tiles" id="tiles"></div>
+      <p class="honest small">One live run on this machine, not a benchmark.</p>
+      <section class="card" id="swarmCard" hidden aria-labelledby="agentsH">
+        <div class="card-h"><h3 id="agentsH">Agents</h3><span class="small muted" id="swarmNote"></span></div>
+        <div id="swarm"></div>
+        <p class="legend small muted" aria-hidden="true"><span><i class="cell waiting"></i>waiting</span><span><i class="cell reading"></i>reading</span><span><i class="cell writing"></i>writing</span><span><i class="cell done"></i>done</span><span><i class="cell stopped"></i>stopped</span></p>
+      </section>
+      <section class="chartgrid" id="charts" aria-label="Live charts">
+        <div class="card"><div class="card-h"><h3>Write speed</h3><div class="legend small" id="legendTok"></div><span class="small muted">tokens/s</span></div><div class="chart" id="chartTok"></div></div>
+        <div class="card"><div class="card-h"><h3>Read speed</h3><span class="small muted">tokens/s</span></div><div class="chart" id="chartRead"></div></div>
+        <div class="card"><div class="card-h"><h3>GPU busy</h3><span class="small muted">percent</span></div><div class="chart" id="chartGpu"></div></div>
+        <div class="card"><div class="card-h"><h3>Memory</h3><span class="small muted" id="memNote">MB</span></div><div class="chart" id="chartMem"></div></div>
+      </section>
+      <section aria-labelledby="answersH">
+        <h3 id="answersH" class="answers-h">Answers</h3>
+        <div id="messages"></div>
+      </section>
+      <details class="card more" id="allNums"><summary>All numbers of this run</summary><div id="last"></div></details>
+      <details class="card more log"><summary>Event log</summary><div id="log"></div></details>
     </div>
-    <div class="chartgrid" id="charts">
-      <div class="card">
-        <div class="card-h"><h2>Writing</h2><div class="legend" id="legendTok"></div><span class="small muted">tok/s</span></div>
-        <div class="chart" id="chartTok"></div>
-      </div>
-      <div class="card">
-        <div class="card-h"><h2>Reading</h2><span class="small muted">tok/s</span></div>
-        <div class="chart" id="chartRead"></div>
-      </div>
-      <div class="card">
-        <div class="card-h"><h2>GPU busy</h2><span class="small muted" id="gpuNote">%</span></div>
-        <div class="chart" id="chartGpu"></div>
-      </div>
-      <div class="card">
-        <div class="card-h"><h2>Memory</h2><span class="small muted" id="memNote"></span></div>
-        <div class="chart" id="chartMem"></div>
-      </div>
-    </div>
-    <div class="card" id="lastCard" hidden>
-      <div class="card-h"><h2 id="lastTitle">Last run</h2></div>
-      <div id="last"></div>
-    </div>
-    <details class="card log"><summary>Event log</summary><div id="log"></div></details>
   </section>
 </main>
 
-<!-- file library -->
-<dialog id="files">
-  <div class="dlg-h"><h2>Pick files</h2><span class="small muted" id="filesRoot">Samples and your own files</span><button class="ghost" id="filesClose" aria-label="Close">✕</button></div>
-  <div class="row"><input id="filesSearch" placeholder="Search files…" aria-label="Search files"></div>
+<dialog id="files" aria-labelledby="filesH">
+  <div class="dlg-h"><h2 id="filesH">Documents</h2><span class="small muted sub">The tests read these. Samples come with the playground.</span><button class="btn icon quiet" id="filesClose" type="button" aria-label="Close"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button></div>
+  <input id="filesSearch" type="search" placeholder="Search documents" aria-label="Search documents">
   <div id="filesList" class="fileslist"></div>
-  <div class="row dropzone" id="drop">
-    <span class="small muted">Add your own text files: drop them here or</span>
-    <input type="file" id="upload" multiple accept=".md,.txt,.json,.csv,.py,.rs,.toml,.yaml,.yml" aria-label="Add text files">
+  <div class="dropzone" id="drop">
+    <svg class="ic" aria-hidden="true"><use href="#i-upload"/></svg>
+    <span class="small">Drop text files here, or</span>
+    <label class="btn" id="uploadBtn">Add files<input type="file" id="upload" class="sr" multiple accept=".md,.txt,.json,.csv,.py,.rs,.toml,.yaml,.yml"></label>
   </div>
-  <div class="dlg-f"><span class="small muted" id="filesSel"></span><button id="filesNone" class="link">Clear</button>
-    <button id="filesDone" class="primary">Done</button></div>
+  <p class="small" id="filesMsg" role="status"></p>
+  <div class="dlg-f"><span class="small muted" id="filesSel"></span><button id="filesNone" class="link" type="button">Clear selection</button><button id="filesDone" class="btn primary" type="button">Done</button></div>
 </dialog>
 
-<!-- models: recommended, search, a link of your own, downloads, installed -->
-<dialog id="models">
-  <div class="dlg-h"><h2>Models</h2><span class="small muted" id="modelsDir"></span><button class="ghost" id="modelsClose" aria-label="Close">✕</button></div>
-  <p class="small warnline" id="modelsOffline" hidden>Offline mode is on (SONIC_PLAYGROUND_OFFLINE): search and downloads are off. Models in your models folder still work.</p>
-  <div id="modelsOnline">
-    <h3>Recommended</h3>
-    <div id="recList" class="mlist"></div>
-    <h3>Search Hugging Face</h3>
-    <div class="row"><input id="hubSearch" placeholder="Model name, for example qwen3 or llama 3.1…" aria-label="Search Hugging Face for GGUF models"></div>
-    <p class="small muted" id="hubStatus"></p>
-    <div id="hubResults" class="mlist"></div>
-    <div id="hubFiles"></div>
-    <h3>Your own link</h3>
-    <div class="row"><input id="customSrc" placeholder="https://huggingface.co/owner/repo/resolve/main/file.gguf, or owner/repo" aria-label="Link or owner/repo">
-      <input id="customFile" placeholder="file name, if you gave owner/repo" aria-label="File name" size="24"><button id="customGo" class="primary">Download</button></div>
+<dialog id="models" class="wide" aria-labelledby="modelsH">
+  <div class="dlg-h"><h2 id="modelsH">Models</h2><span class="small muted sub" id="modelsDir"></span><button class="btn icon quiet" id="modelsClose" type="button" aria-label="Close"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button></div>
+  <p class="callout" id="modelsOffline" hidden>Offline mode is on: search and downloads are off. Models already in your models folder still work.</p>
+  <div id="modelsErr" role="alert"></div>
+  <div id="dlStrip" aria-live="polite"></div>
+  <div class="tabs" role="tablist" aria-label="Models">
+    <button role="tab" id="tabInstalled" aria-controls="panInstalled" aria-selected="true" type="button">On this Mac</button>
+    <button role="tab" id="tabRec" aria-controls="panRec" aria-selected="false" tabindex="-1" type="button">Recommended</button>
+    <button role="tab" id="tabHub" aria-controls="panHub" aria-selected="false" tabindex="-1" type="button">Search Hugging Face</button>
   </div>
-  <h3>Downloads</h3>
-  <div id="dlList" class="mlist"><span class="small muted">None yet.</span></div>
-  <h3>On this computer</h3>
-  <div id="installedList" class="mlist"></div>
-  <p class="small muted">A model that needs a Hugging Face account: start the playground with HF_TOKEN set. The token is sent only to huggingface.co and is not stored.</p>
+  <div class="mbody">
+    <div role="tabpanel" id="panInstalled" aria-labelledby="tabInstalled"><ul id="installedList" class="mlist"></ul></div>
+    <div role="tabpanel" id="panRec" aria-labelledby="tabRec" hidden>
+      <p class="small muted">The models behind the numbers in the README. Each fits a Mac with the memory shown.</p>
+      <ul id="recList" class="mlist"></ul>
+    </div>
+    <div role="tabpanel" id="panHub" aria-labelledby="tabHub" hidden>
+      <div class="searchrow"><svg class="ic" aria-hidden="true"><use href="#i-search"/></svg><input id="hubSearch" type="search" placeholder="Search GGUF models, for example qwen3 or llama 3.1" aria-label="Search Hugging Face for GGUF models"></div>
+      <p class="small muted" id="hubStatus" role="status"></p>
+      <ul id="hubResults" class="mlist"></ul>
+      <div id="hubFiles"></div>
+      <details class="adv own"><summary>Have a link? Paste it</summary>
+        <div class="ownrow">
+          <label class="field">Link to a .gguf file, or owner/repo<input id="customSrc" type="text" placeholder="https://huggingface.co/owner/repo/resolve/main/file.gguf"></label>
+          <label class="field">File name, if you gave owner/repo<input id="customFile" type="text"></label>
+          <button id="customGo" class="btn primary" type="button">Download</button>
+        </div>
+      </details>
+    </div>
+  </div>
+  <p class="small muted foot">A model that needs a Hugging Face account: start the playground with HF_TOKEN set. The token is sent only to huggingface.co and is never stored.</p>
+</dialog>
+
+<dialog id="history" class="drawer" aria-labelledby="historyH">
+  <div class="dlg-h"><h2 id="historyH">Earlier runs</h2><button class="btn icon quiet" id="historyClose" type="button" aria-label="Close"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button></div>
+  <p class="small muted">Saved on this Mac. Each is one live run, not a benchmark.</p>
+  <ul id="historyList" class="hlist"></ul>
 </dialog>
 
 <div id="tip" class="tip" hidden></div>
 <script src="/static/charts.js"></script>
+<script src="/static/state.js"></script>
+<script src="/static/numbers.js"></script>
 <script src="/static/liveview.js"></script>
+<script src="/static/testsview.js"></script>
+<script src="/static/app.js"></script>
+<script src="/static/topbar.js"></script>
+<script src="/static/tests.js"></script>
+<script src="/static/files.js"></script>
+<script src="/static/result.js"></script>
+<script src="/static/history.js"></script>
 <script src="/static/live.js"></script>
+<script src="/static/modelsview.js"></script>
 <script src="/static/models.js"></script>
 </body>
 </html>

@@ -125,8 +125,8 @@ async def _run_exact(s: Session, req: RunReq, run_id: str, rt: str) -> dict:
     diff = next((i for i in range(n) if alone["ids"][i] != mixed["ids"][i]), None)
     same = alone["ids"] == mixed["ids"]
     live.BUS.publish({"type": "token", "run": run_id, "rt": rt,
-                 "text": "\n\n" + ("✅ bit-identical next to %d others" % (len(rs) - 1) if same else
-                                   f"❌ differs at token {diff if diff is not None else n}")})  # fmt: skip
+                 "text": "\n\n" + ("Identical words, next to %d others" % (len(rs) - 1) if same else
+                                   f"The words differ at token {diff if diff is not None else n}")})  # fmt: skip
     return {"exact": same, "first_diff": diff, "others": len(rs) - 1, "tokens_compared": max(len(alone["ids"]), len(mixed["ids"]))}
 
 

@@ -205,6 +205,17 @@ async def put_file(name: str, request: Request) -> dict:
     return {"path": path}
 
 
+@router.delete("/files/{name}")
+async def delete_file(name: str) -> dict:
+    """Remove a document of the user's own from the library (the bundled samples stay)."""
+    try:
+        path = await asyncio.to_thread(documents.delete_upload, name)
+    except documents.DocumentError as e:
+        raise HTTPException(404, str(e)) from e
+    log(f"removed {path} from the documents")
+    return {"path": path}
+
+
 @router.post("/run")
 async def post_run(req: RunReq) -> dict:
     """Accept a run: between the checks and its task there is no await, so a second POST sees it (409) and Stop reaches

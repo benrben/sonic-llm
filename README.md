@@ -184,6 +184,19 @@ Start the server with a second, small model (`--helper-model small.gguf`) and fo
 curl localhost:8080/v1/helper/classify -d '{"text": "The package arrived broken.", "labels": ["complaint", "praise", "question"]}'
 ```
 
+## Playground
+
+A web page that runs next to the engine: pick a model (or search Hugging Face and download one from the page), pick one of 15 tests, and watch Sonic LLM run it live, side by side with llama.cpp if you have `llama-server` installed.
+
+```sh
+cd playground
+uv run sonic-playground          # then open http://localhost:8000
+```
+
+<img src="docs/assets/playground.png" alt="The playground after the test Many questions, one document on Qwen3 4B: Sonic LLM 2.7 s, llama.cpp 10.5 s, 3.9x faster, with the agents grid, live charts and both answers." width="100%">
+
+The numbers on the page are one live run on your machine, not a benchmark. Details and settings are in [playground/README.md](playground/README.md).
+
 ## More results
 
 **Big mixture-of-experts model, writing.** Qwen3.6 35B-A3B with its makers' prediction head (a 704 MB side file next to the model): 128-137 tokens per second, against 73-81 on the same engine with the head off. Forty answers out of forty were token-identical with the head on and off.

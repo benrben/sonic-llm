@@ -290,8 +290,8 @@ class _TurnsRun:
         """What the page shows of the run: the rounds, the RAM check's verdict, agent 1's answers."""
         return (f"{n} agents took {TURNS_ROUNDS} rounds, {k} writing at once; "
                 f"{self.stats['written']:,} tokens written in {rounds_wall:.1f} s.\n"
-                + ("✅ agent 1 wrote the same tokens after its SSD round trips as it did staying in RAM\n" if same else
-                   "❌ agent 1's tokens differ from the run that stayed in RAM\n" if same is False else "")
+                + ("Agent 1 wrote the same words after being parked on disk as it did staying in memory\n" if same else
+                   "Agent 1's words differ from the run that stayed in memory\n" if same is False else "")
                 + "".join(f"\nAgent 1, round {i + 1}: {t[:200]}" for i, t in enumerate(self.first_text)))  # fmt: skip
 
     def metrics(self, n: int, k: int, rounds_wall: float, same: bool | None, lifecycle: dict) -> dict:

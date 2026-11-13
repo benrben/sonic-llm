@@ -32,8 +32,8 @@ def test_the_page_is_served_with_the_product_name(client):
 def test_state_lists_the_tests_and_the_library(client):
     d = client.get("/api/live/state").json()
     assert d["session"] is None and d["files"]["n"] == 2 and "gpu_lock" not in d
-    assert [s["id"] for s in d["scenarios"]] == ["chat", "swarm", "shared", "load", "exact", "burst", "team", "followup", "relay",
-                                                  "long", "turns", "classify", "extract", "compress", "summarize"]
+    assert [s["id"] for s in d["scenarios"]] == ["chat", "long", "swarm", "team", "followup", "relay", "turns", "shared",
+                                                  "classify", "extract", "summarize", "compress", "load", "burst", "exact"]
     assert client.get("/api/live/scenarios").json()["scenarios"] == d["scenarios"]
 
 
@@ -60,6 +60,15 @@ def test_documents_are_text_only_with_token_estimates_and_can_be_added(client):
     assert [f["path"] for f in client.get("/api/live/files").json()["files"]][-1] == "uploads/mine.md"
     assert client.put("/api/live/files/run.exe", content=b"x").status_code == 422
     assert client.put("/api/live/files/big.md", content=b"x" * 2_000_001).status_code == 413
+
+
+def test_a_document_of_your_own_can_be_removed_and_a_sample_cannot(client):
+    client.put("/api/live/files/mine.md", content=b"my own notes")
+    assert client.delete("/api/live/files/mine.md").json() == {"path": "uploads/mine.md"}
+    assert [f["path"] for f in client.get("/api/live/files").json()["files"]] == ["samples/a.md", "samples/b.txt"]
+    assert client.delete("/api/live/files/mine.md").status_code == 404  # already gone
+    assert client.delete("/api/live/files/a.md").status_code == 404  # a sample is not the user's to remove
+    assert client.get("/api/live/files").json()["files"][0]["path"] == "samples/a.md"
 
 
 def test_history_is_newest_first_and_a_damaged_line_is_skipped_and_logged(client, cfg, monkeypatch):
