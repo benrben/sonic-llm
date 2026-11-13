@@ -141,6 +141,10 @@ def test_chat_swarm_and_burst_with_real_clicks(playground):
         # chat: the only controls are the question, the documents and the answer level
         page.fill("#input", "Say something short.")
         assert page.locator("#agentsRow").is_hidden() and page.locator("#levelBox").is_visible()
+        # choosing a level focuses a hidden radio: the panel itself must not scroll (the Run bar stays at its bottom)
+        page.click("#think label:has-text('Sonic')")
+        page.click("#think label:has-text('Off')")
+        assert page.evaluate("document.querySelector('.picker').scrollTop") == 0
         page.click("#send")
         page.wait_for_function("document.getElementById('runState').textContent.includes('Done')", timeout=30_000)
         assert page.locator("#messages .answer .text").first.inner_text().strip()

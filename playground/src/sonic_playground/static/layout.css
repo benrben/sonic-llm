@@ -14,7 +14,7 @@
 .split { display: grid; grid-template-columns: minmax(360px, 440px) minmax(0, 1fr); gap: 20px; align-items: start; max-width: 1760px; margin: 0 auto; padding: 20px; }
 
 /* the picker: all the tests, and the one Run button */
-.picker { position: sticky; top: calc(var(--top-h, 58px) + 20px); display: grid; grid-template-rows: minmax(0, 1fr) auto; height: calc(100vh - var(--top-h, 58px) - 40px); height: calc(100dvh - var(--top-h, 58px) - 40px); background: var(--card); border: 1px solid var(--hairline); border-radius: var(--radius); overflow: hidden; }
+.picker { position: sticky; top: calc(var(--top-h, 58px) + 20px); display: grid; grid-template-rows: minmax(0, 1fr) auto; height: calc(100vh - var(--top-h, 58px) - 40px); height: calc(100dvh - var(--top-h, 58px) - 40px); background: var(--card); border: 1px solid var(--hairline); border-radius: var(--radius); overflow: clip; }
 .picker-scroll { min-height: 0; overflow-y: auto; padding: 16px 16px 4px; }
 .picker h2 { font-size: var(--fs-l); }
 .picker .lead { margin: 2px 0 14px; font-size: var(--fs-s); color: var(--muted); }
@@ -24,7 +24,7 @@
 .test:hover { border-color: var(--edge-soft); }
 .test.on { border-color: var(--blue); box-shadow: 0 0 0 1px var(--blue); }
 .test:has(input:focus-visible) { outline: 2px solid var(--blue-ink); outline-offset: 2px; }
-.pick { display: grid; grid-template-columns: 32px minmax(0, 1fr) 20px; align-items: start; gap: 12px; padding: 12px; cursor: pointer; border-radius: var(--radius); }
+.pick { position: relative; display: grid; grid-template-columns: 32px minmax(0, 1fr) 20px; align-items: start; gap: 12px; padding: 12px; cursor: pointer; border-radius: var(--radius); }
 .pick input { position: absolute; opacity: 0; width: 1px; height: 1px; }
 .pick .ico { display: grid; place-items: center; width: 32px; height: 32px; border-radius: var(--radius-s); background: var(--card); color: var(--ink-2); }
 .test.on .ico { background: var(--blue); color: var(--on-btn); }
@@ -48,7 +48,7 @@
 .agentsbox label { display: flex; align-items: center; gap: 10px; }
 .agentsbox input { width: 84px; }
 .agentsbox .room { flex-basis: 100%; font-weight: 400; }
-.seg { display: inline-flex; flex-wrap: wrap; border: 1px solid var(--edge); border-radius: var(--radius-s); overflow: hidden; }
+.seg { position: relative; display: inline-flex; flex-wrap: wrap; border: 1px solid var(--edge); border-radius: var(--radius-s); overflow: hidden; }
 .seg label { cursor: pointer; }
 .seg input { position: absolute; opacity: 0; width: 1px; height: 1px; }
 .seg span { display: block; padding: 6px 12px; font-size: var(--fs-s); color: var(--ink-2); border-right: 1px solid var(--hairline); }
